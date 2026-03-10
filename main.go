@@ -49,7 +49,7 @@ var defaultChapterRes = []string{
 	`(?m)^[\[《〈〈【『「〔（<({]?[0-9]{1,4}[\]》〉〉〕」』】）>)}]?\s*([、.：:：|｜\s-]|——)\s*.*$`,
 
 	// 5. 纯汉字序号 (限制长度以防误触正文)
-	// 匹配如 "二十一 这里的风景"，要求中间至少有两个空格或一个标点
+	// 匹配如 "二十一 这里的风景"
 	`(?m)^\s*[一二三四五六七八九十百千万亿两零壹贰叁肆伍陆柒捌玖拾佰仟萬]{1,10}[、\s：:]+.*$`,
 
 	// 6. 罗马数字
@@ -59,13 +59,13 @@ var defaultChapterRes = []string{
 func main() {
 	cfg := AdvancedConfig{}
 	flag.StringVar(&cfg.InputPath, "i", "", "输入TXT文件")
-	flag.StringVar(&cfg.OutputPath, "o", "", "输出路径")
-	flag.StringVar(&cfg.Title, "t", "", "书名")
-	flag.StringVar(&cfg.Author, "a", "Unknown", "作者")
-	flag.StringVar(&cfg.CoverPath, "c", "", "封面路径")
+	flag.StringVar(&cfg.OutputPath, "o", "", "输出文件(默认: 输入文件名.epub)")
+	flag.StringVar(&cfg.Title, "t", "", "书名(默认: 输入文件名)")
+	flag.StringVar(&cfg.Author, "a", "Unknown", "作者(默认: Unknown)")
+	flag.StringVar(&cfg.CoverPath, "c", "", "封面图片路径")
 	flag.StringVar(&cfg.CssPath, "s", "", "样式文件路径")
-	flag.StringVar(&cfg.ChapterRe, "r", ``, "章节识别正则")
-	flag.StringVar(&cfg.ImgRe, "m", `\[IMG:(.*?)\]`, "图片标签识别正则")
+	flag.StringVar(&cfg.ChapterRe, "r", ``, "章节识别正则(默认: 内置自动检测规则)")
+	flag.StringVar(&cfg.ImgRe, "m", `\[IMG:(.*?)\]`, "图片标签识别正则(默认: [IMG:xxx])")
 	flag.Parse()
 
 	if cfg.InputPath == "" && flag.NArg() > 0 {
@@ -73,7 +73,7 @@ func main() {
 	}
 	if cfg.InputPath == "" {
 		fmt.Println("❌ 错误: 请提供输入文件")
-		fmt.Println("用法示例: tool input.txt 或 tool -i input.txt")
+		fmt.Println("用法示例: iepub input.txt 或 iepub -i input.txt")
 		return
 	}
 
