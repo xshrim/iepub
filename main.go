@@ -51,7 +51,7 @@ func main() {
 	flag.StringVar(&cfg.CssPath, "s", "", "样式文件路径")
 	flag.StringVar(&cfg.ChapterRe, "r", ``, "章节识别正则(默认: 内置自动检测规则)")
 	flag.StringVar(&cfg.ImgRe, "m", `\[IMG:(.*?)\]`, "图片标签识别正则(默认: [IMG:xxx])")
-	flag.StringVar(&cfg.Llm, "l", "", "大模型补全章节标题(格式: glm/glm-4-flash:xxxx")
+	flag.StringVar(&cfg.Llm, "l", "", "大模型补全章节标题(格式: glm/glm-4-flash:xxxx)")
 	flag.IntVar(&cfg.Wait, "w", 300, "大模型调用毫秒间隔(默认: 300ms)")
 	flag.Parse()
 
