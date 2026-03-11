@@ -43,7 +43,7 @@ type AdvancedConfig struct {
 
 func main() {
 	cfg := AdvancedConfig{}
-	flag.StringVar(&cfg.InputPath, "i", "", "输入TXT文件")
+	flag.StringVar(&cfg.InputPath, "i", "", "输入TXT或EPUB文件")
 	flag.StringVar(&cfg.OutputPath, "o", "", "输出文件(默认: 输入文件名.epub)")
 	flag.StringVar(&cfg.Title, "t", "", "书名(默认: 输入文件名)")
 	flag.StringVar(&cfg.Author, "a", "Unknown", "作者(默认: Unknown)")
