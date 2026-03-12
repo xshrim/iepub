@@ -52,7 +52,7 @@ func main() {
 	flag.StringVar(&cfg.ChapterRe, "r", ``, "章节识别正则(默认: 内置自动检测规则)")
 	flag.StringVar(&cfg.ImgRe, "m", `\[IMG:(.*?)\]`, "图片标签识别正则(默认: [IMG:xxx])")
 	flag.StringVar(&cfg.Llm, "l", "", "大模型补全章节标题(格式: glm/glm-4-flash:xxxx)")
-	flag.IntVar(&cfg.Wait, "w", 300, "大模型调用毫秒间隔(默认: 300ms)")
+	flag.IntVar(&cfg.Wait, "w", 1000, "大模型调用毫秒间隔(默认: 1000ms)")
 	flag.Parse()
 
 	if cfg.InputPath == "" && flag.NArg() > 0 {
@@ -225,16 +225,16 @@ func lockRegex(lines []string, customRe string) []string {
 	// 1. 定义内置正则库
 	patterns := []string{
 		// 1. 标准强特征型 (第x章)
-		`^第\s*[0-9一二三四五六七八九十百千万亿两零壹贰叁肆伍陆柒捌玖拾佰仟萬]{1,9}\s*[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲]\s*.{0,30}$`,
+		`^\s*第\s*[0-9一二三四五六七八九十百千万亿两零壹贰叁肆伍陆柒捌玖拾佰仟萬]{1,9}\s*[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲]\s*.{0,30}$`,
 
 		// 2. 标准弱特征型 (十二章)
 		`^\s*[0-9一二三四五六七八九十百千万亿两零壹贰叁肆伍陆柒捌玖拾佰仟萬]{1,9}\s*[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲]\s*.{0,30}$`,
 
 		// 3. 符号包裹型 (【第一章】)
-		`^[\[《〈〈【『「〔（<({].{0,10}[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲].{0,10}[\]》〉〉〕」』】）>)}].{0,30}$`,
+		`^\s*[\[《〈〈【『「〔（<({].{0,10}[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲].{0,10}[\]》〉〉〕」』】）>)}].{0,30}$`,
 
 		// 4. 无符号数字型(天界篇)
-		`^\S{0,10}[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲]$`,
+		`^\s*[^第\s]{0,10}[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲]$`,
 
 		// 5. 数字分隔型(二十一 标题)
 		`^\s*[0-9一二三四五六七八九十百千万亿两零壹贰叁肆伍陆柒捌玖拾佰仟萬]{1,9}[、.：:|｜——\s-]+.{0,30}$`,
@@ -243,10 +243,10 @@ func lockRegex(lines []string, customRe string) []string {
 		`^\s*[\[《〈〈【『「〔（<({][0-9一二三四五六七八九十百千万亿两零壹贰叁肆伍陆柒捌玖拾佰仟萬]{1,9}[\]》〉〉〕」』】）>)}][、.：:|｜——\s-]?.{0,30}$`,
 
 		// 4. 英文标题型(Chapter 1)
-		`(?i)^(Chapter|Section|Case|Episode|Lesson|Clause|Article|Book|Part|Unit|Stanza|Canto|Vol|Volume|Catalog|Preface|Foreword|Prologue|Abstract|Summary|Synopsis|Opening|Ending|Afterword|Epilogue|Interlude|Appendix|Acknowledgments|Postscript|Extra|Toc|Table of Contents|Related Information|Back Matter|Final Words| Closing Remarks|Side Story)\s*[0-9]{1,5}.{0,30}$`,
+		`(?i)^\s*(Chapter|Section|Case|Episode|Lesson|Clause|Article|Book|Part|Unit|Stanza|Canto|Vol|Volume|Catalog|Preface|Foreword|Prologue|Abstract|Summary|Synopsis|Opening|Ending|Afterword|Epilogue|Interlude|Appendix|Acknowledgments|Postscript|Extra|Toc|Table of Contents|Related Information|Back Matter|Final Words| Closing Remarks|Side Story)\s*[0-9]{1,5}.{0,30}$`,
 
 		// 7. 罗马数字型
-		`(?i)^(M{1,4}|M{0,4}(?:CM|CD|D?C{1,3})|M{0,4}(?:D?C{0,3})(?:XC|XL|L?X{1,3})|M{0,4}(?:D?C{0,3})(?:L?X{0,3})(?:IX|IV|V?I{1,3}))([、.：:|｜——\s-].{1,30})$`,
+		`(?i)^\s*(M{1,4}|M{0,4}(?:CM|CD|D?C{1,3})|M{0,4}(?:D?C{0,3})(?:XC|XL|L?X{1,3})|M{0,4}(?:D?C{0,3})(?:L?X{0,3})(?:IX|IV|V?I{1,3}))([、.：:|｜——\s-].{1,30})$`,
 	}
 
 	// 如果用户提供了自定义正则，优先级最高
@@ -390,6 +390,9 @@ func extractChapterContent(lines []string, regexps []string) string {
 			}
 		}
 	}
+	if end == 0 {
+		end = len(lines)
+	}
 	if start < end {
 		return strings.Join(lines[start+1:end], "\n")
 	} else {
@@ -478,7 +481,11 @@ func buildEpub(e *epub.Epub, content, chapterReg, cssPath, llm string, wait int)
 	lines := strings.Split(content, "\n")
 
 	// 预取3000行进行章节正则锁定，避免后续章节识别混乱（尤其是正文中有类似章节格式的行）
-	chapterRegs := lockRegex(lines[:5000], chapterReg)
+	prefetch := 5000
+	if len(lines) < prefetch {
+		prefetch = len(lines)
+	}
+	chapterRegs := lockRegex(lines[:prefetch], chapterReg)
 
 	var currentBody strings.Builder
 	title := "前言"
@@ -522,13 +529,20 @@ func buildEpub(e *epub.Epub, content, chapterReg, cssPath, llm string, wait int)
 				}
 				title = line
 				// fmt.Printf("📖 识别到章节: %s\n", title)
+				aiflag := ""
 				if trueTitle(title) == "" && llm != "" {
-					content := strings.TrimSpace(extractChapterContent(lines[idx:idx+1000], chapterRegs))
-					title = fmt.Sprintf("%s %s", title, getAiTitle(llm, content))
-					time.Sleep(time.Duration(wait) * time.Millisecond)
+					cend := idx + 1000
+					if cend > len(lines) {
+						cend = len(lines)
+					}
+					content := strings.TrimSpace(extractChapterContent(lines[idx:cend], chapterRegs))
+					if ai, aititle := getAiTitle(llm, content, wait); aititle != "" {
+						title = fmt.Sprintf("%s %s", title, aititle)
+						aiflag = ai
+					}
 				}
 				title = strings.TrimSpace(title)
-				fmt.Printf("§ 识别到章节: %s\n", title)
+				fmt.Printf("§ %s识别到章节: %s\n", aiflag, title)
 				currentBody.WriteString(fmt.Sprintf("<h2 class='chapter-title'>%s</h2>\n", title))
 			} else {
 				// 对话和其他内容处理
@@ -545,77 +559,105 @@ func wrap(body string) string {
 	return fmt.Sprintf("<body>%s</body>", body)
 }
 
-func getAiTitle(llm, chapterContent string) string {
+func getAiTitle(llm, chapterContent string, wait int) (string, string) {
 	chapterContent = strings.TrimSpace(chapterContent)
 	if chapterContent == "" {
-		return ""
+		return "", ""
 	}
 
-	var llmurl, model, apikey string
+	var llmurl, apikey string
+	var models []string
 	llminfo := strings.Split(llm, ":")
 	if len(llminfo) < 2 {
-		return ""
+		return "", ""
 	}
 
 	llmname := strings.ToLower(llminfo[0])
 	apikey = llminfo[1]
 	if llmname == "" || apikey == "" {
-		return ""
+		return "", ""
 	}
 
-	switch {
-	case strings.HasPrefix(llmname, "glm"):
+	llmkey := strings.Split(llmname, "/")
+	llmname = llmkey[0]
+	if len(llmkey) > 1 {
+		models = strings.Split(strings.Join(llmkey[1:], "/"), ",")
+	}
+
+	switch llmname {
+	case "glm":
 		llmurl = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-		model = "glm-4-flash"
-		if len(strings.Split(llmname, "/")) > 1 {
-			model = strings.Split(llmname, "/")[1]
+		if len(models) == 0 {
+			models = []string{"glm-4-flash"}
 		}
-	case strings.HasPrefix(llmname, "gemini"):
-		model = "gemini-flash-lite-latest"
-		if len(strings.Split(llmname, "/")) > 1 {
-			model = strings.Split(llmname, "/")[1]
+	case "gemini":
+		llmurl = "https://api.gemini.com/v1/chat/completions"
+		if len(models) == 0 {
+			models = []string{"gemini-flash-lite-latest"}
+		}
+	case "sili", "silicon", "siliconflow":
+		llmurl = "https://api.siliconflow.cn/v1/chat/completions"
+		if len(models) == 0 {
+			models = []string{"Qwen/Qwen3-8B", "Qwen/Qwen2.5-7B-Instruct", "Qwen/Qwen2-7B-Instruct", "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "Qwen/Qwen3.5-4B", "THUDM/GLM-4.1V-9B-Thinking", "THUDM/glm-4-9b-chat", "THUDM/GLM-Z1-9B-0414", "THUDM/GLM-4-9B-0414", "tencent/Hunyuan-MT-7B"}
 		}
 	default:
-		return ""
+		return "", ""
 	}
 
-	payload := map[string]interface{}{
-		"model": model,
-		"messages": []map[string]string{
-			{"role": "system", "content": "你是一位优秀的网文编辑，请根据正文生成一个2-7字的简炼的符合正文风格的章节标题(不要包含标点符号)，只返回标题文本。"},
-			{"role": "user", "content": "内容如下：\n" + chapterContent},
-		},
-	}
+	var output string
 
-	body, _ := json.Marshal(payload)
+	for {
+		for _, model := range models {
+			payload := map[string]interface{}{
+				"model": model,
+				"messages": []map[string]string{
+					{"role": "system", "content": "你是一位优秀的网文编辑，请根据正文生成一个2-7字的简炼直观契合风格的章节标题，严格遵守字数限制，只生产一个最合适的，不能包含符号，只允许返回标题文本。"},
+					{"role": "user", "content": "内容如下：\n" + chapterContent},
+				},
+			}
 
-	// 2. 发送请求
-	req, _ := http.NewRequest("POST", llmurl, bytes.NewBuffer(body))
-	req.Header.Set("Authorization", "Bearer "+apikey)
-	req.Header.Set("Content-Type", "application/json")
+			body, _ := json.Marshal(payload)
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		fmt.Printf("❌ 请求大模型 %s 失败: %v\n", llmname, err)
-		return ""
-	}
-	defer resp.Body.Close()
+			// 2. 发送请求
+			req, _ := http.NewRequest("POST", llmurl, bytes.NewBuffer(body))
+			req.Header.Set("Authorization", "Bearer "+apikey)
+			req.Header.Set("Content-Type", "application/json")
 
-	// 3. 解析响应 (直接解析到匿名 map)
-	respData, _ := io.ReadAll(resp.Body)
-	var result map[string]interface{}
-	if err := json.Unmarshal(respData, &result); err != nil {
-		fmt.Printf("❌ 解析大模型 %s 响应失败: %v\n", llmname, err)
-		return ""
-	}
+			for i := 2; i > 0; i-- {
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					fmt.Printf("❌ 请求大模型 %s(%s) 失败: %v\n", llmname, model, err)
+					time.Sleep(time.Duration(wait) * time.Millisecond)
+					continue
+				}
+				defer resp.Body.Close()
 
-	// 4. 通过键值路径提取数据 (断言处理)
-	if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
-		firstChoice := choices[0].(map[string]interface{})
-		message := firstChoice["message"].(map[string]interface{})
-		return strings.TrimSpace(message["content"].(string))
-	} else {
-		fmt.Printf("❌ 大模型 %s 响应异常: %v\n", llmname, string(respData))
-		return ""
+				// 3. 解析响应 (直接解析到匿名 map)
+				respData, _ := io.ReadAll(resp.Body)
+				var result map[string]interface{}
+				if err := json.Unmarshal(respData, &result); err != nil {
+					fmt.Printf("❌ 解析大模型 %s(%s) 响应失败: %v\n", llmname, model, err)
+					time.Sleep(time.Duration(wait) * time.Millisecond)
+					continue
+				}
+
+				// 4. 通过键值路径提取数据 (断言处理)
+				if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
+					firstChoice := choices[0].(map[string]interface{})
+					message := firstChoice["message"].(map[string]interface{})
+					output = strings.TrimSpace(message["content"].(string))
+					break
+				} else {
+					fmt.Printf("❌ 大模型 %s(%s) 响应异常: %v\n", llmname, model, string(respData))
+					time.Sleep(time.Duration(wait) * time.Millisecond)
+					continue
+				}
+			}
+
+			if output != "" {
+				return model, regexp.MustCompile(`[^\p{L}\p{N}]+`).ReplaceAllString(output, "")
+			}
+		}
+		time.Sleep(time.Duration(60000/wait/len(models)+1) * time.Second)
 	}
 }
