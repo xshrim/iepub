@@ -4,13 +4,16 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -29,42 +32,97 @@ import (
 )
 
 type AdvancedConfig struct {
-	InputPath  string
-	OutputPath string
-	Title      string
-	Author     string
-	CoverPath  string
-	CssPath    string
-	ChapterRe  string
-	ImgRe      string // 图片嵌入正则，例如 [IMG:1.jpg]
-	Llm        string // 大模型配置，例如 glm/glm-4-flash:xxxx
-	Wait       int    // 大模型调用毫秒间隔
+	InputPath   string
+	OutputPath  string
+	Title       string
+	Creator     string
+	Contributor string
+	Language    string
+	Description string
+	Subject     string
+	Date        string
+	Publisher   string
+	Rights      string
+	CoverPath   string
+	CssPath     string
+	ChapterRe   string
+	ImgRe       string // 图片嵌入正则，例如 [IMG:1.jpg]
+	Llm         string // 大模型配置，例如 glm/glm-4-flash:xxxx
+	Wait        int    // 大模型调用毫秒间隔
+	Info        bool
+	Port        int
+}
+
+type OPFPackage struct {
+	XMLName  xml.Name `xml:"package"`
+	Metadata struct {
+		Title       string   `xml:"http://purl.org/dc/elements/1.1/ title"`
+		Creator     []string `xml:"http://purl.org/dc/elements/1.1/ creator"`
+		Contributor []string `xml:"http://purl.org/dc/elements/1.1/ contributor"`
+		Language    string   `xml:"http://purl.org/dc/elements/1.1/ language"`
+		Subject     []string `xml:"http://purl.org/dc/elements/1.1/ subject"`
+		Description string   `xml:"http://purl.org/dc/elements/1.1/ description"`
+		Date        string   `xml:"http://purl.org/dc/elements/1.1/ date"`
+		Publisher   string   `xml:"http://purl.org/dc/elements/1.1/ publisher"`
+		Rights      string   `xml:"http://purl.org/dc/elements/1.1/ rights"`
+	} `xml:"metadata"`
+	Manifest struct {
+		Items []struct {
+			ID         string `xml:"id,attr"`
+			Href       string `xml:"href,attr"`
+			Properties string `xml:"properties,attr"`
+		} `xml:"item"`
+	} `xml:"manifest"`
+}
+
+type NCX struct {
+	XMLName   xml.Name   `xml:"http://www.daisy.org/z3986/2005/ncx/ ncx"`
+	Title     string     `xml:"docTitle>text"`
+	NavPoints []NavPoint `xml:"navMap>navPoint"`
+}
+
+type NavPoint struct {
+	Text      string     `xml:"navLabel>text"`
+	Content   string     `xml:"content-src,attr"` // 获取 content 标签的 src 属性
+	NavPoints []NavPoint `xml:"navPoint"`         // 递归处理嵌套子目录
 }
 
 func main() {
 	cfg := AdvancedConfig{}
-	flag.StringVar(&cfg.InputPath, "i", "", "输入TXT或EPUB文件")
+	flag.BoolVar(&cfg.Info, "i", false, "获取或修改epub元数据")
 	flag.StringVar(&cfg.OutputPath, "o", "", "输出文件(默认: 输入文件名.epub)")
 	flag.StringVar(&cfg.Title, "t", "", "书名(默认: 输入文件名)")
-	flag.StringVar(&cfg.Author, "a", "Unknown", "作者(默认: Unknown)")
+	flag.StringVar(&cfg.Creator, "a", "", "作者")
+	flag.StringVar(&cfg.Contributor, "x", "", "制作者与协作者")
+	flag.StringVar(&cfg.Language, "g", "", "语言")
+	flag.StringVar(&cfg.Description, "e", "", "描述")
+	flag.StringVar(&cfg.Subject, "k", "", "标签")
+	flag.StringVar(&cfg.Date, "d", "", "发行日期")
+	flag.StringVar(&cfg.Publisher, "u", "", "出版商")
+	flag.StringVar(&cfg.Rights, "b", "", "版权声明")
 	flag.StringVar(&cfg.CoverPath, "c", "", "封面图片路径")
 	flag.StringVar(&cfg.CssPath, "s", "", "样式文件路径")
 	flag.StringVar(&cfg.ChapterRe, "r", ``, "章节识别正则(默认: 内置自动检测规则)")
 	flag.StringVar(&cfg.ImgRe, "m", `\[IMG:(.*?)\]`, "图片标签识别正则(默认: [IMG:xxx])")
 	flag.StringVar(&cfg.Llm, "l", "", "大模型补全章节标题(格式: glm/glm-4-flash:xxxx)")
 	flag.IntVar(&cfg.Wait, "w", 1000, "大模型调用毫秒间隔(默认: 1000ms)")
+	flag.IntVar(&cfg.Port, "p", 2233, "服务端口(默认: 2233)")
 	flag.Parse()
 
-	if cfg.InputPath == "" && flag.NArg() > 0 {
-		cfg.InputPath = flag.Arg(0)
+	if flag.NArg() > 0 {
+		if flag.Arg(0) == "server" {
+			server(cfg.Port)
+		} else {
+			cfg.InputPath = flag.Arg(0)
+		}
 	}
 	if cfg.InputPath == "" {
-		fmt.Println("❌ 错误: 请提供输入文件")
-		fmt.Println("用法示例: iepub input.txt 或 iepub input.epub 或 iepub -i input.txt 或 iepub -i input.epub")
+		fmt.Println("✘ 错误: 请提供输入文件")
+		fmt.Println("用法示例: iepub input.txt 或 iepub input.epub")
 		return
 	}
 	if _, err := os.Stat(cfg.InputPath); err != nil {
-		fmt.Println("❌ 错误: 获取输入文件失败:", err.Error())
+		fmt.Println("✘ 错误: 获取输入文件失败:", err.Error())
 		return
 	}
 
@@ -78,20 +136,483 @@ func main() {
 			cfg.Title = strings.TrimSuffix(filepath.Base(cfg.InputPath), filepath.Ext(filepath.Base(cfg.InputPath)))
 			fmt.Printf("ℹ 未指定书名，自动使用文件名: [%s]\n", cfg.Title)
 		}
-		txtToepub(cfg.InputPath, cfg.OutputPath, cfg.Title, cfg.Author, cfg.ChapterRe, cfg.CoverPath, cfg.CssPath, cfg.Llm, cfg.Wait)
-	case ".epub":
-		if cfg.OutputPath == "" {
-			cfg.OutputPath = strings.TrimSuffix(filepath.Base(cfg.InputPath), filepath.Ext(filepath.Base(cfg.InputPath))) + ".txt"
-			fmt.Printf("ℹ 未指定输出文件名，自动使用输入文件名: [%s]\n", cfg.OutputPath)
+
+		meta := make(map[string]string)
+		if cfg.Title != "" {
+			meta["title"] = cfg.Title
 		}
-		epubToTxt(cfg.InputPath, cfg.OutputPath)
+		if cfg.Creator != "" {
+			meta["creator"] = cfg.Creator
+		}
+		if cfg.Contributor != "" {
+			meta["contributor"] = cfg.Contributor
+		}
+		if cfg.Language != "" {
+			meta["language"] = cfg.Language
+		}
+		if cfg.Description != "" {
+			meta["description"] = cfg.Description
+		}
+		if cfg.Subject != "" {
+			meta["subject"] = cfg.Subject
+		}
+		if cfg.Date != "" {
+			meta["date"] = cfg.Date
+		}
+		if cfg.Publisher != "" {
+			meta["publisher"] = cfg.Publisher
+		}
+		if cfg.Rights != "" {
+			meta["rights"] = cfg.Rights
+		}
+		txtToEpub(cfg.InputPath, cfg.OutputPath, cfg.ChapterRe, cfg.CoverPath, cfg.CssPath, cfg.Llm, cfg.Wait, meta)
+	case ".epub":
+		if cfg.Info {
+			meta := make(map[string]string)
+			if cfg.Title != "" {
+				meta["title"] = cfg.Title
+			}
+			if cfg.Creator != "" {
+				meta["creator"] = cfg.Creator
+			}
+			if cfg.Contributor != "" {
+				meta["contributor"] = cfg.Contributor
+			}
+			if cfg.Language != "" {
+				meta["language"] = cfg.Language
+			}
+			if cfg.Description != "" {
+				meta["description"] = cfg.Description
+			}
+			if cfg.Subject != "" {
+				meta["subject"] = cfg.Subject
+			}
+			if cfg.Date != "" {
+				meta["date"] = cfg.Date
+			}
+			if cfg.Publisher != "" {
+				meta["publisher"] = cfg.Publisher
+			}
+			if cfg.Rights != "" {
+				meta["rights"] = cfg.Rights
+			}
+
+			if len(meta) > 0 || cfg.CoverPath != "" {
+				metaEdit(cfg.InputPath, cfg.OutputPath, cfg.CoverPath, meta)
+			} else {
+				if meta, err := metaView(cfg.InputPath); err != nil {
+					fmt.Printf("✘ 未找到元数据: %v\n", err)
+				} else {
+					fmt.Printf("书名(Title): %s\n", meta["title"])
+					fmt.Printf("作者(Creator): %s\n", meta["creator"])
+					fmt.Printf("协作(Contributor): %s\n", meta["contributor"])
+					fmt.Printf("语言(Language): %s\n", meta["language"])
+					fmt.Printf("描述(Description): %s\n", meta["description"])
+					fmt.Printf("标签(Subject): %s\n", meta["subject"])
+					fmt.Printf("发行(Date): %s\n", meta["date"])
+					fmt.Printf("版商(Publisher): %s\n", meta["publisher"])
+					fmt.Printf("版权(Rights): %s\n", meta["rights"])
+					fmt.Printf("封面(Cover): %s\n", meta["cover"])
+					fmt.Printf("目录(Toc):\n")
+					for _, chapter := range strings.Split(meta["toc"], "|||") {
+						chp := strings.Split(chapter, "@@@")
+						chpname := chp[0]
+						chpitem := chp[1]
+						fmt.Printf("  - %s\n", chpname)
+						if chpitem != "" {
+							for _, item := range strings.Split(chpitem, ":::") {
+								fmt.Printf("    - %s\n", item)
+							}
+						}
+					}
+				}
+			}
+
+		} else {
+			if cfg.OutputPath == "" {
+				cfg.OutputPath = strings.TrimSuffix(filepath.Base(cfg.InputPath), filepath.Ext(filepath.Base(cfg.InputPath))) + ".txt"
+				fmt.Printf("ℹ 未指定输出文件名，自动使用输入文件名: [%s]\n", cfg.OutputPath)
+			}
+			epubToTxt(cfg.InputPath, cfg.OutputPath)
+		}
 	}
+}
+
+func server(port int) {
+	http.HandleFunc("/convert", handleConvert)
+	http.HandleFunc("/metadata", handleGetMetadata)
+	http.HandleFunc("/edit", handleEditMetadata)
+
+	fmt.Printf("▶ 启动服务模式: http://0.0.0.0:%d\n", port)
+	http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
+}
+
+func handleGetMetadata(w http.ResponseWriter, r *http.Request) {
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "请上传文件", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	tempFile, _ := os.CreateTemp("", "*.epub")
+	defer os.Remove(tempFile.Name())
+	io.Copy(tempFile, file)
+
+	meta, err := metaView(tempFile.Name())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Fprint(w, meta)
+}
+
+func handleEditMetadata(w http.ResponseWriter, r *http.Request) {
+	r.ParseMultipartForm(32 << 20) // 32MB max
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "请上传文件", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	tempInput := filepath.Join(os.TempDir(), "input_"+header.Filename)
+	tempOutput := filepath.Join(os.TempDir(), "output_"+header.Filename)
+	f, _ := os.Create(tempInput)
+	io.Copy(f, file)
+	f.Close()
+	defer os.Remove(tempInput)
+
+	meta := make(map[string]string)
+
+	if title := r.FormValue("title"); title != "" {
+		meta["title"] = title
+	}
+	if creator := r.FormValue("creator"); creator != "" {
+		meta["creator"] = creator
+	}
+	if contributor := r.FormValue("contributor"); contributor != "" {
+		meta["contributor"] = contributor
+	}
+	if language := r.FormValue("language"); language != "" {
+		meta["language"] = language
+	}
+	if description := r.FormValue("description"); description != "" {
+		meta["description"] = description
+	}
+	if subject := r.FormValue("subject"); subject != "" {
+		meta["subject"] = subject
+	}
+	if date := r.FormValue("date"); date != "" {
+		meta["date"] = date
+	}
+	if publisher := r.FormValue("publisher"); publisher != "" {
+		meta["publisher"] = publisher
+	}
+	if rights := r.FormValue("rights"); rights != "" {
+		meta["rights"] = rights
+	}
+
+	newCoverPath := ""
+	coverFile, coverHeader, err := r.FormFile("cover")
+	if err == nil {
+		tempCover := filepath.Join(os.TempDir(), coverHeader.Filename)
+		cf, _ := os.Create(tempCover)
+		io.Copy(cf, coverFile)
+		cf.Close()
+		newCoverPath = tempCover
+		defer os.Remove(tempCover)
+	}
+
+	err = metaEdit(tempInput, tempOutput, newCoverPath, meta)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Disposition", "attachment; filename=modified_"+header.Filename)
+	http.ServeFile(w, r, tempOutput)
+	os.Remove(tempOutput)
+}
+
+func handleConvert(w http.ResponseWriter, r *http.Request) {
+	file, header, _ := r.FormFile("file")
+	ext := filepath.Ext(header.Filename)
+
+	tempInput := filepath.Join(os.TempDir(), header.Filename)
+	f, _ := os.Create(tempInput)
+	io.Copy(f, file)
+	f.Close()
+	defer os.Remove(tempInput)
+
+	var outputName string
+	var targetPath string
+
+	meta := make(map[string]string)
+	// 2. 获取修改参数
+	if title := r.FormValue("title"); title != "" {
+		meta["title"] = title
+	}
+	if creator := r.FormValue("creator"); creator != "" {
+		meta["creator"] = creator
+	}
+	if contributor := r.FormValue("contributor"); contributor != "" {
+		meta["contributor"] = contributor
+	}
+	if language := r.FormValue("language"); language != "" {
+		meta["language"] = language
+	}
+	if description := r.FormValue("description"); description != "" {
+		meta["description"] = description
+	}
+	if subject := r.FormValue("subject"); subject != "" {
+		meta["subject"] = subject
+	}
+	if date := r.FormValue("date"); date != "" {
+		meta["date"] = date
+	}
+	if publisher := r.FormValue("publisher"); publisher != "" {
+		meta["publisher"] = publisher
+	}
+	if rights := r.FormValue("rights"); rights != "" {
+		meta["rights"] = rights
+	}
+
+	chpre := r.FormValue("chpre")
+	llm := r.FormValue("llm")
+	wait := 300
+	if iwait := r.FormValue("wait"); iwait != "" {
+		wait, _ = strconv.Atoi(iwait)
+	}
+
+	var newCoverPath, newCssPath string
+	coverFile, coverHeader, err := r.FormFile("cover")
+	if err == nil {
+		tempCover := filepath.Join(os.TempDir(), coverHeader.Filename)
+		cf, _ := os.Create(tempCover)
+		io.Copy(cf, coverFile)
+		cf.Close()
+		newCoverPath = tempCover
+		defer os.Remove(tempCover)
+	}
+	cssFile, cssHeader, err := r.FormFile("css")
+	if err == nil {
+		tempCss := filepath.Join(os.TempDir(), cssHeader.Filename)
+		cf, _ := os.Create(tempCss)
+		io.Copy(cf, cssFile)
+		cf.Close()
+		newCssPath = tempCss
+		defer os.Remove(tempCss)
+	}
+
+	switch ext {
+	case ".epub":
+		outputName = strings.TrimSuffix(header.Filename, ".epub") + ".txt"
+		targetPath = filepath.Join(os.TempDir(), outputName)
+		epubToTxt(tempInput, targetPath)
+	case ".txt":
+		outputName = strings.TrimSuffix(header.Filename, ".txt") + ".epub"
+		targetPath = filepath.Join(os.TempDir(), outputName)
+		txtToEpub(tempInput, targetPath, chpre, newCoverPath, newCssPath, llm, wait, meta)
+	}
+
+	w.Header().Set("Content-Disposition", "attachment; filename="+outputName)
+	http.ServeFile(w, r, targetPath)
+	os.Remove(targetPath)
+}
+
+func metaView(inputPath string) (map[string]string, error) {
+	r, err := zip.OpenReader(inputPath)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	var meta = make(map[string]string)
+
+	for _, f := range r.File {
+		if strings.HasSuffix(f.Name, ".opf") {
+			var cover string
+			rc, _ := f.Open()
+			buf, _ := io.ReadAll(rc)
+			rc.Close()
+
+			var pkg OPFPackage
+			xml.Unmarshal(buf, &pkg)
+
+			for _, item := range pkg.Manifest.Items {
+				if strings.Contains(item.Properties, "cover-image") || item.ID == "cover" || item.ID == "cover-image" {
+					cover = path.Join(path.Dir(f.Name), item.Href)
+					break
+				}
+			}
+			meta["title"] = pkg.Metadata.Title
+			meta["creator"] = strings.Join(pkg.Metadata.Creator, ",")
+			meta["contributor"] = strings.Join(pkg.Metadata.Contributor, ",")
+			meta["language"] = pkg.Metadata.Language
+			meta["description"] = pkg.Metadata.Description
+			meta["subject"] = strings.Join(pkg.Metadata.Subject, ",")
+			meta["date"] = pkg.Metadata.Date
+			meta["publisher"] = pkg.Metadata.Publisher
+			meta["rights"] = pkg.Metadata.Rights
+			meta["cover"] = cover
+		} else if strings.HasSuffix(f.Name, ".ncx") {
+			rc, _ := f.Open()
+			buf, _ := io.ReadAll(rc)
+			rc.Close()
+
+			var toc []string
+			var ncx NCX
+			xml.Unmarshal(buf, &ncx)
+			for _, p := range ncx.NavPoints {
+				var ss []string
+				for _, s := range p.NavPoints {
+					ss = append(ss, s.Text)
+				}
+				toc = append(toc, fmt.Sprintf("%s@@@%s", p.Text, strings.Join(ss, ":::")))
+			}
+			meta["toc"] = strings.Join(toc, "|||")
+		} else {
+			continue
+		}
+	}
+
+	return meta, nil
+}
+
+func metaEdit(inputPath, outputPath, newCoverPath string, meta map[string]string) error {
+	if len(meta) == 0 && newCoverPath == "" {
+		return nil
+	}
+
+	r, err := zip.OpenReader(inputPath)
+	if err != nil {
+		return err
+	}
+
+	var opfPath, opfContent, originalCoverHref string
+	var opfDir string
+
+	for _, f := range r.File {
+		if strings.HasSuffix(f.Name, ".opf") {
+			opfPath = f.Name
+			opfDir = path.Dir(opfPath)
+			rc, _ := f.Open()
+			buf, _ := io.ReadAll(rc)
+			rc.Close()
+			opfContent = string(buf)
+
+			var pkg OPFPackage
+			xml.Unmarshal(buf, &pkg)
+
+			for _, item := range pkg.Manifest.Items {
+				if strings.Contains(item.Properties, "cover-image") || item.ID == "cover" || item.ID == "cover-image" {
+					originalCoverHref = path.Join(opfDir, item.Href)
+					break
+				}
+			}
+		}
+	}
+
+	var out *os.File
+	if outputPath != "" {
+		out, err = os.Create(outputPath)
+		if err != nil {
+			return err
+		}
+	} else { // overwrite
+		out, err = os.CreateTemp("", filepath.Base(inputPath)+".tmp")
+		if err != nil {
+			return err
+		}
+
+		outputPath = out.Name()
+
+		defer func() {
+			out.Close()
+			os.Remove(outputPath)
+		}()
+	}
+
+	w := zip.NewWriter(out)
+
+	for _, f := range r.File {
+		if f.Name == "mimetype" {
+			fh := &zip.FileHeader{Name: "mimetype", Method: zip.Store}
+			fw, _ := w.CreateHeader(fh)
+			rc, _ := f.Open()
+			io.Copy(fw, rc)
+			rc.Close()
+			break
+		}
+	}
+
+	coverWritten := false
+	targetCoverHref := originalCoverHref
+
+	if newCoverPath != "" && targetCoverHref == "" {
+		targetCoverHref = path.Join(opfDir, "cover"+filepath.Ext(newCoverPath))
+	}
+
+	for _, f := range r.File {
+		if f.Name == "mimetype" {
+			continue
+		}
+
+		rc, _ := f.Open()
+		fw, _ := w.Create(f.Name)
+
+		if f.Name == opfPath {
+			modified := opfContent
+			for k, v := range meta {
+				modified = ensureMetadataTag(modified, strings.ToLower(k), v)
+			}
+
+			if newCoverPath != "" && originalCoverHref == "" {
+				reMetaTag := regexp.MustCompile(`(?i)(<metadata[^>]*>)`)
+				metaNode := "\n    " + `<meta name="cover" content="cover"/>`
+				modified = reMetaTag.ReplaceAllString(modified, "${1}"+metaNode)
+
+				reManiTag := regexp.MustCompile(`(?i)(<manifest[^>]*>)`)
+				itemNode := "\n    " + fmt.Sprintf(`<item id="cover" href="%s" media-type="%s" properties="cover-image"/>`,
+					path.Base(targetCoverHref), getMediaType(newCoverPath))
+				modified = reManiTag.ReplaceAllString(modified, "${1}"+itemNode)
+			}
+
+			fw.Write([]byte(modified))
+		} else if newCoverPath != "" && f.Name == targetCoverHref {
+			newCover, _ := os.ReadFile(newCoverPath)
+			fw.Write(newCover)
+			coverWritten = true
+		} else {
+			io.Copy(fw, rc)
+		}
+		rc.Close()
+	}
+
+	if newCoverPath != "" && !coverWritten {
+		cfw, _ := w.Create(targetCoverHref)
+		newCover, _ := os.ReadFile(newCoverPath)
+		cfw.Write(newCover)
+	}
+
+	if err := w.Close(); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	r.Close()
+
+	return moveFile(outputPath, inputPath)
 }
 
 func epubToTxt(inputPath, outputPath string) {
 	reader, err := zip.OpenReader(inputPath)
 	if err != nil {
-		fmt.Printf("❌ 文件读取失败: %v", err)
+		fmt.Printf("✘ 文件读取失败: %v", err)
 		return
 	}
 	defer reader.Close()
@@ -115,10 +636,7 @@ func epubToTxt(inputPath, outputPath string) {
 			continue
 		}
 
-		// 3. 提取逻辑：包含标题、段落、代码块、容器和跨度
-		// 我们按顺序选择所有可能的文本容器
 		doc.Find("h1, h2, h3, h4, h5, h6, p, pre, div, span").Each(func(i int, s *goquery.Selection) {
-			// 避坑：如果 span 在 p 或 div 内部，直接取父节点的 Text 即可，防止重复提取
 			parentTag := ""
 			if p := s.Parent(); p != nil {
 				parentTag = goquery.NodeName(p)
@@ -138,40 +656,52 @@ func epubToTxt(inputPath, outputPath string) {
 				fmt.Printf("§ 识别到章节: %s\n", text)
 				fullText.WriteString(fmt.Sprintf("\n\n【 %s 】\n\n", text))
 			case "pre":
-				// 保留代码块的原始换行
 				fullText.WriteString("\n--- CODE BLOCK START ---\n")
 				fullText.WriteString(s.Text())
 				fullText.WriteString("\n--- CODE BLOCK END ---\n\n")
 			default:
-				// 普通段落、div 或 span
 				fullText.WriteString(text + "\n\n")
 			}
 		})
 	}
 
 	if err := os.WriteFile(outputPath, []byte(fullText.String()), 0644); err != nil {
-		fmt.Printf("❌ 生成失败: %v", err)
+		fmt.Printf("✘ 生成失败: %v", err)
 	} else {
 		fmt.Printf("✔ 转换成功: %s\n", outputPath)
 	}
 }
 
-func txtToepub(inputPath, outputPath, title, author, chapterReg, coverPath, cssPath, llm string, wait int) {
+func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath, llm string, wait int, meta map[string]string) {
 
-	// 1. 自动检测并读取内容
 	contentBytes, err := os.ReadFile(inputPath)
 	if err != nil {
-		fmt.Printf("❌ 文件读取失败: %v", err)
+		fmt.Printf("✘ 文件读取失败: %v", err)
 		return
 	}
 
 	decodedContent := autoDecode(contentBytes)
 
-	// 2. 初始化 EPUB
-	e, _ := epub.NewEpub(title)
-	e.SetAuthor(author)
+	if l, ok := meta["language"]; !ok || l == "" {
+		meta["language"] = "zh-CN"
+	}
 
-	// 3. 封面与样式
+	e, _ := epub.NewEpub(meta["title"])
+	delete(meta, "title")
+	for k, v := range meta {
+		switch k {
+		case "creator":
+			e.SetAuthor(v)
+			delete(meta, k)
+		case "description":
+			e.SetDescription(v)
+			delete(meta, k)
+		case "language":
+			e.SetLang(v)
+			delete(meta, k)
+		}
+	}
+
 	if coverPath != "" {
 		internalCoverPath, _ := e.AddImage(coverPath, "cover.jpg")
 		e.SetCover(internalCoverPath, "")
@@ -199,26 +729,174 @@ func txtToepub(inputPath, outputPath, title, author, chapterReg, coverPath, cssP
 		//		.code-wrapper pre { overflow-x: auto; background-color: #f8f8f8; padding: 10px; border-radius: 4px; font-size: 0.85em; line-height: 1.4; font-family: "Courier New", monospace; margin: 1em 0; white-space: pre; word-wrap: normal; }
 		// `
 		tempCss, _ := os.CreateTemp("", "style*.css")
-		// 确保程序结束时删除临时文件
 		defer os.Remove(tempCss.Name())
 
 		tempCss.WriteString(css)
 		tempCss.Close()
 
-		// 4. 【关键步骤】将临时文件路径传给 AddCSS
-		// 第二个参数是 EPUB 内部的目标路径名
 		internalCssPath, _ = e.AddCSS(tempCss.Name(), "style.css")
 	}
 
-	// 4. 解析章节与图片
 	buildEpub(e, decodedContent, chapterReg, internalCssPath, llm, wait)
 
-	// 5. 保存
 	if err := e.Write(outputPath); err != nil {
-		fmt.Printf("❌ 生成失败: %v", err)
+		fmt.Printf("✘ 生成失败: %v", err)
 	} else {
+		if len(meta) > 0 {
+			if err := metaEdit(outputPath, "", "", meta); err != nil {
+				fmt.Printf("✘ 注入元数据失败: %v", err)
+				return
+			}
+		}
 		fmt.Printf("✔ 转换成功: %s\n", outputPath)
 	}
+}
+
+func buildEpub(e *epub.Epub, content, chapterReg, cssPath, llm string, wait int) {
+	dialogueReg := regexp.MustCompile(`(?s)([“"‘'「『《〈【〔（({\[].+?[”"’」』》〉〕】）)}\]])`)
+
+	lines := strings.Split(content, "\n")
+
+	prefetch := 5000
+	if len(lines) < prefetch {
+		prefetch = len(lines)
+	}
+	chapterRegs := lockRegex(lines[:prefetch], chapterReg)
+
+	var currentBody strings.Builder
+	title := "前言"
+	currentBody.WriteString(fmt.Sprintf("<h2 class='chapter-title'>%s</h2>\n", title))
+
+	var inCodeBlock bool
+	var codeBuffer strings.Builder
+	var codeLanguage string
+
+	for idx, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, "```") {
+			if !inCodeBlock {
+				inCodeBlock = true
+				codeLanguage = strings.TrimPrefix(line, "```")
+				if codeLanguage == "" {
+					codeLanguage = "text"
+				}
+			} else {
+				highlighted := highlightCode(codeBuffer.String(), codeLanguage)
+				currentBody.WriteString(fmt.Sprintf("<div class='code-wrapper'>%s</div>", highlighted))
+				codeBuffer.Reset()
+				inCodeBlock = false
+			}
+			continue
+		}
+
+		if inCodeBlock {
+			codeBuffer.WriteString(line + "\n")
+		} else {
+			if isChapter(line, chapterRegs) {
+				if currentBody.Len() > 0 {
+					e.AddSection(wrap(currentBody.String()), title, "", cssPath)
+					currentBody.Reset()
+				}
+				title = line
+				aiflag := ""
+				if trueTitle(title) == "" && llm != "" {
+					cend := idx + 1000
+					if cend > len(lines) {
+						cend = len(lines)
+					}
+					content := strings.TrimSpace(extractChapterContent(lines[idx:cend], chapterRegs))
+					if ai, aititle := getAiTitle(llm, content, wait); aititle != "" {
+						title = fmt.Sprintf("%s %s", title, aititle)
+						aiflag = ai
+					}
+				}
+				title = strings.TrimSpace(title)
+				fmt.Printf("§ %s识别到章节: %s\n", aiflag, title)
+				currentBody.WriteString(fmt.Sprintf("<h2 class='chapter-title'>%s</h2>\n", title))
+			} else {
+				processedLine := dialogueReg.ReplaceAllString(line, `<span class="dialogue">$1</span>`)
+				currentBody.WriteString(fmt.Sprintf("<p class='text-para'>%s</p>\n", processedLine))
+			}
+		}
+	}
+	e.AddSection(wrap(currentBody.String()), title, "", cssPath)
+}
+
+func getMediaType(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	default:
+		return "image/jpeg"
+	}
+}
+
+func moveFile(src, dst string) error {
+	err := os.Rename(src, dst)
+	if err == nil {
+		return nil
+	}
+
+	source, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+
+	destination, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destination.Close()
+
+	if _, err := io.Copy(destination, source); err != nil {
+		return err
+	}
+
+	source.Close()
+	destination.Close()
+
+	return os.Remove(src)
+}
+
+func ensureMetadataTag(xmlStr, tagName, tagValue string) string {
+	if tagValue == "" {
+		return xmlStr
+	}
+
+	if tagName == "creator" || tagName == "contributor" || tagName == "subject" {
+		re := regexp.MustCompile(fmt.Sprintf(`(?s)(<(?:\w+:)?%s[^>]*>).*?(</(?:\w+:)?%s>)`, tagName, tagName))
+		if re.MatchString(xmlStr) {
+			return re.ReplaceAllString(xmlStr, "")
+		}
+		var newNode string
+		reMeta := regexp.MustCompile(`(?i)(<metadata[^>]*>)`)
+		for _, tagVal := range strings.Split(tagValue, ",") {
+			newNode += fmt.Sprintf("\n    <dc:%s>%s</dc:%s>", tagName, strings.TrimSpace(tagVal), tagName)
+		}
+		return reMeta.ReplaceAllString(xmlStr, "${1}"+newNode)
+	}
+
+	re := regexp.MustCompile(fmt.Sprintf(`(?s)(<(?:\w+:)?%s[^>]*>).*?(</(?:\w+:)?%s>)`, tagName, tagName))
+	if re.MatchString(xmlStr) {
+		return re.ReplaceAllString(xmlStr, "${1}"+tagValue+"${2}")
+	}
+
+	reMeta := regexp.MustCompile(`(?i)(<metadata[^>]*>)`)
+	newNode := fmt.Sprintf("\n    <dc:%s>%s</dc:%s>", tagName, tagValue, tagName)
+
+	return reMeta.ReplaceAllString(xmlStr, "${1}"+newNode)
 }
 
 func lockRegex(lines []string, customRe string) []string {
@@ -400,7 +1078,6 @@ func extractChapterContent(lines []string, regexps []string) string {
 	}
 }
 
-// 自动识别编码并转换为 UTF-8
 func autoDecode(data []byte) string {
 	detector := chardet.NewTextDetector()
 	result, err := detector.DetectBest(data)
@@ -415,13 +1092,12 @@ func autoDecode(data []byte) string {
 
 	switch normalizedCharset {
 	case "GB18030", "GBK", "GB2312":
-		decoder = simplifiedchinese.GB18030.NewDecoder() // GB18030 是 GBK 的超集，兼容性更好
+		decoder = simplifiedchinese.GB18030.NewDecoder()
 	case "BIG5":
 		decoder = traditionalchinese.Big5.NewDecoder()
 	case "UTF8":
 		return string(data)
 	default:
-		// 如果是 ISO-8859 或其他，尝试强转 GB18030（国内小说最常见情况）
 		if result.Confidence < 50 {
 			decoder = simplifiedchinese.GB18030.NewDecoder()
 		} else {
@@ -471,88 +1147,6 @@ func highlightCode(code, language string) string {
 	}
 
 	return buf.String()
-}
-
-func buildEpub(e *epub.Epub, content, chapterReg, cssPath, llm string, wait int) {
-	// dialogueReg := regexp.MustCompile(`([“"‘'].+?[”"’'])`)
-	dialogueReg := regexp.MustCompile(`([“"‘'「『《〈〈【〔（<({\[].+?[”"’」』》〉〉〕】）>)}\]])`)
-
-	// 按行分割并清理空白
-	lines := strings.Split(content, "\n")
-
-	// 预取3000行进行章节正则锁定，避免后续章节识别混乱（尤其是正文中有类似章节格式的行）
-	prefetch := 5000
-	if len(lines) < prefetch {
-		prefetch = len(lines)
-	}
-	chapterRegs := lockRegex(lines[:prefetch], chapterReg)
-
-	var currentBody strings.Builder
-	title := "前言"
-	currentBody.WriteString(fmt.Sprintf("<h2 class='chapter-title'>%s</h2>\n", title))
-
-	var inCodeBlock bool
-	var codeBuffer strings.Builder
-	var codeLanguage string
-
-	for idx, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		if strings.HasPrefix(line, "```") {
-			if !inCodeBlock {
-				inCodeBlock = true
-				codeLanguage = strings.TrimPrefix(line, "```")
-				if codeLanguage == "" {
-					codeLanguage = "text" // 默认语言
-				}
-			} else {
-				// 代码块结束，渲染并写入 body
-				highlighted := highlightCode(codeBuffer.String(), codeLanguage)
-				currentBody.WriteString(fmt.Sprintf("<div class='code-wrapper'>%s</div>", highlighted))
-				codeBuffer.Reset()
-				inCodeBlock = false
-			}
-			continue
-		}
-
-		if inCodeBlock {
-			codeBuffer.WriteString(line + "\n")
-		} else {
-			// 增强：限制章节行长度，通常章节标题不会超过 50 个字符
-			if isChapter(line, chapterRegs) {
-				if currentBody.Len() > 0 {
-					e.AddSection(wrap(currentBody.String()), title, "", cssPath)
-					currentBody.Reset()
-				}
-				title = line
-				// fmt.Printf("📖 识别到章节: %s\n", title)
-				aiflag := ""
-				if trueTitle(title) == "" && llm != "" {
-					cend := idx + 1000
-					if cend > len(lines) {
-						cend = len(lines)
-					}
-					content := strings.TrimSpace(extractChapterContent(lines[idx:cend], chapterRegs))
-					if ai, aititle := getAiTitle(llm, content, wait); aititle != "" {
-						title = fmt.Sprintf("%s %s", title, aititle)
-						aiflag = ai
-					}
-				}
-				title = strings.TrimSpace(title)
-				fmt.Printf("§ %s识别到章节: %s\n", aiflag, title)
-				currentBody.WriteString(fmt.Sprintf("<h2 class='chapter-title'>%s</h2>\n", title))
-			} else {
-				// 对话和其他内容处理
-				processedLine := dialogueReg.ReplaceAllString(line, `<span class="dialogue">$1</span>`)
-				currentBody.WriteString(fmt.Sprintf("<p class='text-para'>%s</p>\n", processedLine))
-			}
-		}
-	}
-	// 写入最后一章
-	e.AddSection(wrap(currentBody.String()), title, "", cssPath)
 }
 
 func wrap(body string) string {
@@ -618,7 +1212,6 @@ func getAiTitle(llm, chapterContent string, wait int) (string, string) {
 
 			body, _ := json.Marshal(payload)
 
-			// 2. 发送请求
 			req, _ := http.NewRequest("POST", llmurl, bytes.NewBuffer(body))
 			req.Header.Set("Authorization", "Bearer "+apikey)
 			req.Header.Set("Content-Type", "application/json")
@@ -626,29 +1219,27 @@ func getAiTitle(llm, chapterContent string, wait int) (string, string) {
 			for i := 2; i > 0; i-- {
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
-					fmt.Printf("❌ 请求大模型 %s(%s) 失败: %v\n", llmname, model, err)
+					fmt.Printf("✘ 请求大模型 %s(%s) 失败: %v\n", llmname, model, err)
 					time.Sleep(time.Duration(wait) * time.Millisecond)
 					continue
 				}
 				defer resp.Body.Close()
 
-				// 3. 解析响应 (直接解析到匿名 map)
 				respData, _ := io.ReadAll(resp.Body)
 				var result map[string]interface{}
 				if err := json.Unmarshal(respData, &result); err != nil {
-					fmt.Printf("❌ 解析大模型 %s(%s) 响应失败: %v\n", llmname, model, err)
+					fmt.Printf("✘ 解析大模型 %s(%s) 响应失败: %v\n", llmname, model, err)
 					time.Sleep(time.Duration(wait) * time.Millisecond)
 					continue
 				}
 
-				// 4. 通过键值路径提取数据 (断言处理)
 				if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
 					firstChoice := choices[0].(map[string]interface{})
 					message := firstChoice["message"].(map[string]interface{})
 					output = strings.TrimSpace(message["content"].(string))
 					break
 				} else {
-					fmt.Printf("❌ 大模型 %s(%s) 响应异常: %v\n", llmname, model, string(respData))
+					fmt.Printf("✘ 大模型 %s(%s) 响应异常: %v\n", llmname, model, string(respData))
 					time.Sleep(time.Duration(wait) * time.Millisecond)
 					continue
 				}
