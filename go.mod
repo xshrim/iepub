@@ -7,6 +7,7 @@ require (
 	github.com/alecthomas/chroma/v2 v2.23.1
 	github.com/go-shiori/go-epub v1.2.1
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d
+	github.com/yanyiwu/gojieba v1.4.7
 	golang.org/x/text v0.34.0
 )
 

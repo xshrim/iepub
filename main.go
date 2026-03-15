@@ -50,6 +50,7 @@ type AdvancedConfig struct {
 	Llm         string // 大模型配置，例如 glm/glm-4-flash:xxxx
 	Wait        int    // 大模型调用毫秒间隔
 	Info        bool
+	Htime       bool
 	Port        int
 }
 
@@ -104,6 +105,7 @@ func main() {
 	flag.StringVar(&cfg.CssPath, "s", "", "样式文件路径")
 	flag.StringVar(&cfg.ChapterRe, "r", ``, "章节识别正则(默认: 内置自动检测规则)")
 	flag.StringVar(&cfg.ImgRe, "m", `\[IMG:(.*?)\]`, "图片标签识别正则(默认: [IMG:xxx])")
+	flag.BoolVar(&cfg.Htime, "v", false, "高亮时间")
 	flag.StringVar(&cfg.Llm, "l", "", "大模型补全章节标题(格式: glm/glm-4-flash:xxxx)")
 	flag.IntVar(&cfg.Wait, "w", 1000, "大模型调用毫秒间隔(默认: 1000ms)")
 	flag.IntVar(&cfg.Port, "p", 2233, "服务端口(默认: 2233)")
@@ -165,7 +167,7 @@ func main() {
 		if cfg.Rights != "" {
 			meta["rights"] = cfg.Rights
 		}
-		txtToEpub(cfg.InputPath, cfg.OutputPath, cfg.ChapterRe, cfg.CoverPath, cfg.CssPath, cfg.Llm, cfg.Wait, meta)
+		txtToEpub(cfg.InputPath, cfg.OutputPath, cfg.ChapterRe, cfg.CoverPath, cfg.CssPath, cfg.Llm, cfg.Wait, cfg.Htime, meta)
 	case ".epub":
 		if cfg.Info {
 			meta := make(map[string]string)
@@ -386,6 +388,10 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	if iwait := r.FormValue("wait"); iwait != "" {
 		wait, _ = strconv.Atoi(iwait)
 	}
+	htime := false
+	if strings.ToLower(r.FormValue("htime")) == "true" {
+		htime = true
+	}
 
 	var newCoverPath, newCssPath string
 	coverFile, coverHeader, err := r.FormFile("cover")
@@ -415,7 +421,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	case ".txt":
 		outputName = strings.TrimSuffix(header.Filename, ".txt") + ".epub"
 		targetPath = filepath.Join(os.TempDir(), outputName)
-		txtToEpub(tempInput, targetPath, chpre, newCoverPath, newCssPath, llm, wait, meta)
+		txtToEpub(tempInput, targetPath, chpre, newCoverPath, newCssPath, llm, wait, htime, meta)
 	}
 
 	w.Header().Set("Content-Disposition", "attachment; filename="+outputName)
@@ -636,12 +642,12 @@ func epubToTxt(inputPath, outputPath string) {
 			continue
 		}
 
-		doc.Find("h1, h2, h3, h4, h5, h6, p, pre, div, span").Each(func(i int, s *goquery.Selection) {
+		doc.Find("h1, h2, h3, h4, h5, h6, p, pre, div, span, data, time, dfn").Each(func(i int, s *goquery.Selection) {
 			parentTag := ""
 			if p := s.Parent(); p != nil {
 				parentTag = goquery.NodeName(p)
 			}
-			if (parentTag == "p" || parentTag == "div" || parentTag == "pre") && s.Is("span") {
+			if (parentTag == "p" || parentTag == "div" || parentTag == "pre") && (s.Is("span") || s.Is("data") || s.Is("time") || s.Is("dfn")) {
 				return
 			}
 
@@ -672,7 +678,7 @@ func epubToTxt(inputPath, outputPath string) {
 	}
 }
 
-func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath, llm string, wait int, meta map[string]string) {
+func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath, llm string, wait int, htime bool, meta map[string]string) {
 
 	contentBytes, err := os.ReadFile(inputPath)
 	if err != nil {
@@ -712,11 +718,14 @@ func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath, llm string
 		internalCssPath, _ = e.AddCSS(cssPath, "style.css")
 	} else {
 		css := `
-		body { font-family: sans-serif; line-height: 1.5; padding: 5%; color: #333; }
-		h2 { text-align: center; color: #1a5276; margin: 1em 0; }
-		p { text-indent: 2em; margin: 0.5em 0; color: #2c3e50;}
-		span { color: #0e6251 !important; font-style: normal; letter-spacing: 0.05em; }
-		pre { overflow-x: auto; background-color: #f8f8f8; padding: 10px; border-radius: 4px; font-size: 0.85em; line-height: 1.4; font-family: "Courier New", monospace; margin: 1em 0; white-space: pre; word-wrap: normal; }
+		body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Serif CJK SC", serif; line-height: 1.85; padding: 5% 10%; text-align: justify; color: #333; }
+		h2 { text-align: center; color: #1a5276; margin: 2.5em 0 1.5em 0; font-weight: 600; letter-spacing: 0.1em; }
+		p { text-indent: 2em; hyphens: auto; color: #2c3e50; }
+		span { color: #0e6251 !important; font-style: normal; letter-spacing: 0.05em; border-radius: 3px;}
+		data { color: #7b1fa2 !important; font-style: normal; padding: 0 2px; letter-spacing: 0.05em; }
+		dfn { color: #2e5984; letter-spacing: 0.05em; border-bottom: 1px solid rgba(22, 96, 96, 0.2); }
+		time { color: #b45309; font-size: 0.95em; font-variant-numeric: tabular-nums; border-bottom: 1px dotted #aed6f1; }
+		pre { overflow-x: auto; background-color: #f8f8f8; padding: 10px; border-radius: 4px; font-size: 0.85em; line-height: 1.5; font-family: "Courier New", monospace; margin: 1em 0; white-space: pre; word-wrap: normal; }
 	`
 		// 		cssContent := `
 		//     body { font-family: sans-serif; line-height: 1.6; padding: 5%; }
@@ -737,7 +746,7 @@ func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath, llm string
 		internalCssPath, _ = e.AddCSS(tempCss.Name(), "style.css")
 	}
 
-	buildEpub(e, decodedContent, chapterReg, internalCssPath, llm, wait)
+	buildEpub(e, decodedContent, chapterReg, internalCssPath, llm, wait, htime)
 
 	if err := e.Write(outputPath); err != nil {
 		fmt.Printf("✘ 生成失败: %v", err)
@@ -752,8 +761,12 @@ func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath, llm string
 	}
 }
 
-func buildEpub(e *epub.Epub, content, chapterReg, cssPath, llm string, wait int) {
-	dialogueReg := regexp.MustCompile(`(?s)([“"‘'「『《〈【〔（({\[].+?[”"’」』》〉〕】）)}\]])`)
+func buildEpub(e *epub.Epub, content, chapterReg, cssPath, llm string, wait int, htime bool) {
+	reDialog := regexp.MustCompile(`(?s)([“"‘'「].+?[”"’'」])`)
+	reBook := regexp.MustCompile(`([『《〈【〔（({\[].+?[』》〉〕】）)}\]])`)
+	reTime := regexp.MustCompile(`(\d{1,4}年)?\d{1,2}月\d{1,2}[日号號]|\d{1,2}[:：]\d{2}|[子丑寅卯辰巳午未申酉戌亥][时時]|第?[0-9一二三四五六七八九十百千万亿億两兩零壹贰叁肆伍陆陸柒漆捌玖拾佰仟萬数]{1,9}([点點][钟鐘整]|[分秒刻][钟鐘]?|[个個]?小[时時]|[个個]?[钟鐘][头頭]|[个個]?[时時]辰|[更天夜日周週月年]|[个個]?星期|[个個]?[季年]度|[个個]?[岁歲]?月|[个個]?年[头頭]?|甲子|代)|(?i)(?:[清凌]晨|[拂破][晓曉]|早[晨间間]|[上中下]午|午[间間后後]|傍晚|黄昏|薄暮|日落|[入深午子半]夜|整[日天]|白[日天]|晝間|大?[前作今本当當明后後隔][日天]|[翌隔次]日|[上中下]旬|[春夏秋冬][天季]|初春|早春|仲夏|中秋|深秋|秋后|隆冬|立春|雨水|惊蛰|驚蟄|春分|清明|[谷穀]雨|立夏|小[满滿]|芒[种種]|夏至|小暑|大暑|立秋|[处處]暑|白露|秋分|寒露|霜降|立冬|小雪|大雪|冬至|小寒|大寒|大?[去前今本当當明后後隔]年|[上下本当當][月周週]|[周週][一二三四五六壹贰叁肆伍陆陸日天末]|礼拜[一二三四五六壹贰叁肆伍陆陸日天]|星期[一二三四五六壹贰叁肆伍陆陸日天])`)
+
+	// jieba := gojieba.NewJieba()
 
 	lines := strings.Split(content, "\n")
 
@@ -765,7 +778,7 @@ func buildEpub(e *epub.Epub, content, chapterReg, cssPath, llm string, wait int)
 
 	var currentBody strings.Builder
 	title := "前言"
-	currentBody.WriteString(fmt.Sprintf("<h2 class='chapter-title'>%s</h2>\n", title))
+	currentBody.WriteString(fmt.Sprintf("<h2 class='chapter'>%s</h2>\n", title))
 
 	var inCodeBlock bool
 	var codeBuffer strings.Builder
@@ -786,7 +799,7 @@ func buildEpub(e *epub.Epub, content, chapterReg, cssPath, llm string, wait int)
 				}
 			} else {
 				highlighted := highlightCode(codeBuffer.String(), codeLanguage)
-				currentBody.WriteString(fmt.Sprintf("<div class='code-wrapper'>%s</div>", highlighted))
+				currentBody.WriteString(fmt.Sprintf("<div class='code'>%s</div>", highlighted))
 				codeBuffer.Reset()
 				inCodeBlock = false
 			}
@@ -816,10 +829,29 @@ func buildEpub(e *epub.Epub, content, chapterReg, cssPath, llm string, wait int)
 				}
 				title = strings.TrimSpace(title)
 				fmt.Printf("§ %s识别到章节: %s\n", aiflag, title)
-				currentBody.WriteString(fmt.Sprintf("<h2 class='chapter-title'>%s</h2>\n", title))
+				currentBody.WriteString(fmt.Sprintf("<h2 class='chapter'>%s</h2>\n", title))
 			} else {
-				processedLine := dialogueReg.ReplaceAllString(line, `<span class="dialogue">$1</span>`)
-				currentBody.WriteString(fmt.Sprintf("<p class='text-para'>%s</p>\n", processedLine))
+				processedLine := reDialog.ReplaceAllString(line, `<span class='dialog'>$1</span>`)
+				processedLine = reBook.ReplaceAllString(processedLine, `<data class='book'>$1</data>`)
+				if htime {
+					processedLine = reTime.ReplaceAllString(processedLine, `<time class='time'>$0</time>`)
+				}
+				// tags := jieba.Tag(processedLine)
+				// for _, tagStr := range tags {
+				// 	parts := strings.Split(tagStr, "/")
+				// 	word, tag := parts[0], parts[1]
+				// 	switch tag {
+				// 	case "nr":
+				// 		processedLine = strings.ReplaceAll(processedLine, word, fmt.Sprintf(`<dfn class="name">%s</dfn>`, word))
+				// 	case "ns":
+				// 		processedLine = strings.ReplaceAll(processedLine, word, fmt.Sprintf(`<dfn class="place">%s</dfn>`, word))
+				// 	case "nt":
+				// 		processedLine = strings.ReplaceAll(processedLine, word, fmt.Sprintf(`<dfn class="organization">%s</dfn>`, word))
+				// 	case "nz":
+				// 		processedLine = strings.ReplaceAll(processedLine, word, fmt.Sprintf(`<dfn class="entity">%s</dfn>`, word))
+				// 	}
+				// }
+				currentBody.WriteString(fmt.Sprintf("<p class='text'>%s</p>\n", processedLine))
 			}
 		}
 	}
@@ -903,10 +935,10 @@ func lockRegex(lines []string, customRe string) []string {
 	// 1. 定义内置正则库
 	patterns := []string{
 		// 1. 标准强特征型 (第x章)
-		`^\s*第\s*[0-9一二三四五六七八九十百千万亿两零壹贰叁肆伍陆柒捌玖拾佰仟萬]{1,9}\s*[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲]\s*.{0,30}$`,
+		`^\s*第\s*[0-9一二三四五六七八九十百千万亿億两兩零壹贰叁肆伍陆陸柒漆捌玖拾佰仟萬]{1,9}\s*[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲]\s*.{0,30}$`,
 
 		// 2. 标准弱特征型 (十二章)
-		`^\s*[0-9一二三四五六七八九十百千万亿两零壹贰叁肆伍陆柒捌玖拾佰仟萬]{1,9}\s*[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲]\s*.{0,30}$`,
+		`^\s*[0-9一二三四五六七八九十百千万亿億两兩零壹贰叁肆伍陆陸柒漆捌玖拾佰仟萬]{1,9}\s*[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲]\s*.{0,30}$`,
 
 		// 3. 符号包裹型 (【第一章】)
 		`^\s*[\[《〈〈【『「〔（<({].{0,10}[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲].{0,10}[\]》〉〉〕」』】）>)}].{0,30}$`,
@@ -915,10 +947,10 @@ func lockRegex(lines []string, customRe string) []string {
 		`^\s*[^第\s]{0,10}[章节節回迴卷折篇幕序番部季集段层層场場话話页頁记記说說志考述引曲]$`,
 
 		// 5. 数字分隔型(二十一 标题)
-		`^\s*[0-9一二三四五六七八九十百千万亿两零壹贰叁肆伍陆柒捌玖拾佰仟萬]{1,9}[、.：:|｜——\s-]+.{0,30}$`,
+		`^\s*[0-9一二三四五六七八九十百千万亿億两兩零壹贰叁肆伍陆陸柒漆捌玖拾佰仟萬]{1,9}[、.：:|｜——\s-]+.{0,30}$`,
 
 		// 6. 符号包裹数字型([01] 标题)
-		`^\s*[\[《〈〈【『「〔（<({][0-9一二三四五六七八九十百千万亿两零壹贰叁肆伍陆柒捌玖拾佰仟萬]{1,9}[\]》〉〉〕」』】）>)}][、.：:|｜——\s-]?.{0,30}$`,
+		`^\s*[\[《〈〈【『「〔（<({][0-9一二三四五六七八九十百千万亿億两兩零壹贰叁肆伍陆陸柒漆捌玖拾佰仟萬]{1,9}[\]》〉〉〕」』】）>)}][、.：:|｜——\s-]?.{0,30}$`,
 
 		// 4. 英文标题型(Chapter 1)
 		`(?i)^\s*(Chapter|Section|Case|Episode|Lesson|Clause|Article|Book|Part|Unit|Stanza|Canto|Vol|Volume|Catalog|Preface|Foreword|Prologue|Abstract|Summary|Synopsis|Opening|Ending|Afterword|Epilogue|Interlude|Appendix|Acknowledgments|Postscript|Extra|Toc|Table of Contents|Related Information|Back Matter|Final Words| Closing Remarks|Side Story)\s*[0-9]{1,5}.{0,30}$`,
@@ -997,7 +1029,7 @@ func trueTitle(str string) string {
 	builder.Grow(len(title))
 
 	for _, r := range title {
-		if unicode.IsLetter(r) && !strings.Contains("一二三四五六七八九十百千万亿两零壹贰叁肆伍陆柒捌玖拾佰仟萬", string(r)) {
+		if unicode.IsLetter(r) && !strings.Contains("一二三四五六七八九十百千万亿億两兩零壹贰叁肆伍陆陸柒漆捌玖拾佰仟萬", string(r)) {
 			builder.WriteRune(r)
 		}
 	}
