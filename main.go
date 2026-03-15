@@ -660,7 +660,7 @@ func epubToTxt(inputPath, outputPath string) {
 			switch tagName {
 			case "h1", "h2", "h3", "h4", "h5", "h6":
 				fmt.Printf("§ 识别到章节: %s\n", text)
-				fullText.WriteString(fmt.Sprintf("\n\n【 %s 】\n\n", text))
+				fullText.WriteString(fmt.Sprintf("\n %s \n", text))
 			case "pre":
 				fullText.WriteString("\n--- CODE BLOCK START ---\n")
 				fullText.WriteString(s.Text())
