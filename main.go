@@ -3,8 +3,10 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +48,7 @@ type AdvancedConfig struct {
 	Rights      string
 	CoverPath   string
 	CssPath     string
+	illusPath   string
 	ChapterRe   string
 	ImgRe       string // 图片嵌入正则，例如 [IMG:1.jpg]
 	Llm         string // 大模型配置，例如 glm/glm-4-flash:xxxx
@@ -103,6 +107,7 @@ func main() {
 	flag.StringVar(&cfg.Rights, "b", "", "版权声明")
 	flag.StringVar(&cfg.CoverPath, "c", "", "封面图片路径")
 	flag.StringVar(&cfg.CssPath, "s", "", "样式文件路径")
+	flag.StringVar(&cfg.illusPath, "z", "", "插画图片路径")
 	flag.StringVar(&cfg.ChapterRe, "r", ``, "章节识别正则(默认: 内置自动检测规则)")
 	flag.StringVar(&cfg.ImgRe, "m", `\[IMG:(.*?)\]`, "图片标签识别正则(默认: [IMG:xxx])")
 	flag.BoolVar(&cfg.Htime, "v", false, "高亮时间")
@@ -167,7 +172,23 @@ func main() {
 		if cfg.Rights != "" {
 			meta["rights"] = cfg.Rights
 		}
-		txtToEpub(cfg.InputPath, cfg.OutputPath, cfg.ChapterRe, cfg.CoverPath, cfg.CssPath, cfg.Llm, cfg.Wait, cfg.Htime, meta)
+
+		var illusPath []string
+		if cfg.illusPath != "" {
+			if info, err := os.Stat(cfg.illusPath); err == nil {
+				if info.IsDir() {
+					files, _ := os.ReadDir(cfg.illusPath)
+					for _, f := range files {
+						illusPath = append(illusPath, filepath.Join(cfg.illusPath, f.Name()))
+					}
+					sort.Strings(illusPath)
+				} else {
+					illusPath = append(illusPath, cfg.illusPath)
+				}
+			}
+		}
+
+		txtToEpub(cfg.InputPath, cfg.OutputPath, cfg.ChapterRe, cfg.CoverPath, cfg.CssPath, illusPath, cfg.Llm, cfg.Wait, cfg.Htime, meta)
 	case ".epub":
 		if cfg.Info {
 			meta := make(map[string]string)
@@ -199,8 +220,22 @@ func main() {
 				meta["rights"] = cfg.Rights
 			}
 
-			if len(meta) > 0 || cfg.CoverPath != "" {
-				metaEdit(cfg.InputPath, cfg.OutputPath, cfg.CoverPath, meta)
+			if len(meta) > 0 || cfg.CoverPath != "" || cfg.illusPath != "" {
+				var illusPath []string
+				if cfg.illusPath != "" {
+					if info, err := os.Stat(cfg.illusPath); err == nil {
+						if info.IsDir() {
+							files, _ := os.ReadDir(cfg.illusPath)
+							for _, f := range files {
+								illusPath = append(illusPath, filepath.Join(cfg.illusPath, f.Name()))
+							}
+							sort.Strings(illusPath)
+						} else {
+							illusPath = append(illusPath, cfg.illusPath)
+						}
+					}
+				}
+				metaEdit(cfg.InputPath, cfg.OutputPath, cfg.CoverPath, illusPath, meta)
 			} else {
 				if meta, err := metaView(cfg.InputPath); err != nil {
 					fmt.Printf("✘ 未找到元数据: %v\n", err)
@@ -215,6 +250,7 @@ func main() {
 					fmt.Printf("版商(Publisher): %s\n", meta["publisher"])
 					fmt.Printf("版权(Rights): %s\n", meta["rights"])
 					fmt.Printf("封面(Cover): %s\n", meta["cover"])
+					fmt.Printf("插画(Illustration): %s\n", meta["illustration"])
 					fmt.Printf("目录(Toc):\n")
 					for _, chapter := range strings.Split(meta["toc"], "|||") {
 						chp := strings.Split(chapter, "@@@")
@@ -327,8 +363,20 @@ func handleEditMetadata(w http.ResponseWriter, r *http.Request) {
 		newCoverPath = tempCover
 		defer os.Remove(tempCover)
 	}
+	var newillusPath []string
+	illustrations := r.MultipartForm.File["illustrations"]
+	for _, illusHeader := range illustrations {
+		illusFile, _ := illusHeader.Open()
+		defer illusFile.Close()
+		tempIllus := filepath.Join(os.TempDir(), illusHeader.Filename)
+		cf, _ := os.Create(tempIllus)
+		io.Copy(cf, illusFile)
+		cf.Close()
+		newillusPath = append(newillusPath, tempIllus)
+		defer os.Remove(tempIllus)
+	}
 
-	err = metaEdit(tempInput, tempOutput, newCoverPath, meta)
+	err = metaEdit(tempInput, tempOutput, newCoverPath, newillusPath, meta)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -340,6 +388,8 @@ func handleEditMetadata(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleConvert(w http.ResponseWriter, r *http.Request) {
+	r.ParseMultipartForm(32 << 20) // 32MB max
+
 	file, header, _ := r.FormFile("file")
 	ext := filepath.Ext(header.Filename)
 
@@ -412,6 +462,18 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 		newCssPath = tempCss
 		defer os.Remove(tempCss)
 	}
+	var newillusPath []string
+	illustrations := r.MultipartForm.File["illustrations"]
+	for _, illusHeader := range illustrations {
+		illusFile, _ := illusHeader.Open()
+		defer illusFile.Close()
+		tempIllus := filepath.Join(os.TempDir(), illusHeader.Filename)
+		cf, _ := os.Create(tempIllus)
+		io.Copy(cf, illusFile)
+		cf.Close()
+		newillusPath = append(newillusPath, tempIllus)
+		defer os.Remove(tempIllus)
+	}
 
 	switch ext {
 	case ".epub":
@@ -421,7 +483,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	case ".txt":
 		outputName = strings.TrimSuffix(header.Filename, ".txt") + ".epub"
 		targetPath = filepath.Join(os.TempDir(), outputName)
-		txtToEpub(tempInput, targetPath, chpre, newCoverPath, newCssPath, llm, wait, htime, meta)
+		txtToEpub(tempInput, targetPath, chpre, newCoverPath, newCssPath, newillusPath, llm, wait, htime, meta)
 	}
 
 	w.Header().Set("Content-Disposition", "attachment; filename="+outputName)
@@ -450,8 +512,10 @@ func metaView(inputPath string) (map[string]string, error) {
 
 			for _, item := range pkg.Manifest.Items {
 				if strings.Contains(item.Properties, "cover-image") || item.ID == "cover" || item.ID == "cover-image" {
-					cover = path.Join(path.Dir(f.Name), item.Href)
-					break
+					if regexp.MustCompile(`(?i)\.(jpg|jpeg|png|bmp|gif|webp|avif|heic|heif|svg|svgz|tif|tiff|ico)$`).MatchString(f.Name) {
+						cover = path.Join(path.Dir(f.Name), item.Href)
+						break
+					}
 				}
 			}
 			meta["title"] = pkg.Metadata.Title
@@ -464,6 +528,21 @@ func metaView(inputPath string) (map[string]string, error) {
 			meta["publisher"] = pkg.Metadata.Publisher
 			meta["rights"] = pkg.Metadata.Rights
 			meta["cover"] = cover
+		} else if strings.HasSuffix(f.Name, "illustration.xhtml") {
+			rc, _ := f.Open()
+			buf, _ := io.ReadAll(rc)
+			rc.Close()
+
+			var illuss []string
+			reImg := regexp.MustCompile(`(?i)src=["']([^"']+)["']`)
+			matches := reImg.FindAllStringSubmatch(string(buf), -1)
+			for _, match := range matches {
+				if len(match) > 1 {
+					fileName := path.Join(path.Dir(f.Name), match[1])
+					illuss = append(illuss, fileName)
+				}
+			}
+			meta["illustration"] = strings.Join(illuss, ",")
 		} else if strings.HasSuffix(f.Name, ".ncx") {
 			rc, _ := f.Open()
 			buf, _ := io.ReadAll(rc)
@@ -488,8 +567,8 @@ func metaView(inputPath string) (map[string]string, error) {
 	return meta, nil
 }
 
-func metaEdit(inputPath, outputPath, newCoverPath string, meta map[string]string) error {
-	if len(meta) == 0 && newCoverPath == "" {
+func metaEdit(inputPath, outputPath, newCoverPath string, newillusPath []string, meta map[string]string) error {
+	if len(meta) == 0 && newCoverPath == "" && len(newillusPath) == 0 {
 		return nil
 	}
 
@@ -498,8 +577,8 @@ func metaEdit(inputPath, outputPath, newCoverPath string, meta map[string]string
 		return err
 	}
 
-	var opfPath, opfContent, originalCoverHref string
-	var opfDir string
+	var opfPath, opfContent, originalCoverHref, opfDir, illusPagePath, illusPageContent string
+	var hasIllusPage bool
 
 	for _, f := range r.File {
 		if strings.HasSuffix(f.Name, ".opf") {
@@ -515,12 +594,46 @@ func metaEdit(inputPath, outputPath, newCoverPath string, meta map[string]string
 
 			for _, item := range pkg.Manifest.Items {
 				if strings.Contains(item.Properties, "cover-image") || item.ID == "cover" || item.ID == "cover-image" {
-					originalCoverHref = path.Join(opfDir, item.Href)
-					break
+					if regexp.MustCompile(`(?i)\.(jpg|jpeg|png|bmp|gif|webp|avif|heic|heif|svg|svgz|tif|tiff|ico)$`).MatchString(f.Name) {
+						originalCoverHref = path.Join(opfDir, item.Href)
+						break
+					}
 				}
 			}
 		}
+
+		if strings.HasSuffix(f.Name, "illustration.xhtml") {
+			illusPagePath = f.Name
+			rc, _ := f.Open()
+			buf, _ := io.ReadAll(rc)
+			rc.Close()
+			illusPageContent = string(buf)
+			hasIllusPage = true
+		}
 	}
+
+	var illusManifestItems []string
+	var addedIllusNodes string
+	if !hasIllusPage {
+		illusPagePath = path.Join(opfDir, "Text/illustration.xhtml")
+		illusPageContent = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml xmlns:epub="http://www.idpf.org/2007/ops"><head><title dir="auto">Illustrations</title></head><body dir="auto"><div class='illustration-container' style='text-align: center;'></div></body></html>`
+	}
+
+	for _, imgPath := range newillusPath {
+		imgName := filepath.Base(imgPath)
+		// imgName := fmt.Sprintf("illus_%d%s", time.Now().UnixNano()+int64(i), filepath.Ext(imgPath))
+		imgTargetHref := fmt.Sprintf("images/%s", imgName)
+
+		// 注册到 Manifest
+		illusManifestItems = append(illusManifestItems,
+			fmt.Sprintf(`<item id="%s" href="%s" media-type="%s"/>`, uuid(), imgTargetHref, getMediaType(imgName)))
+
+		// 生成插画节点 (使用之前提到的适配样式)
+		addedIllusNodes += fmt.Sprintf("\n<div style='margin-bottom: 20px; text-align: center; margin: 1em 0; page-break-inside: avoid; page-break-after: auto;'><img src='../%s' style='max-width: 100%%; height: auto; display: block; margin: 0 auto;' /></div>", imgTargetHref)
+	}
+
+	// 将新插画插入到 HTML 的 body 结束前
+	illusPageContent = strings.Replace(illusPageContent, "</div></body>", addedIllusNodes+"</div></body>", 1)
 
 	var out *os.File
 	if outputPath != "" {
@@ -559,7 +672,7 @@ func metaEdit(inputPath, outputPath, newCoverPath string, meta map[string]string
 	targetCoverHref := originalCoverHref
 
 	if newCoverPath != "" && targetCoverHref == "" {
-		targetCoverHref = path.Join(opfDir, "cover"+filepath.Ext(newCoverPath))
+		targetCoverHref = path.Join(opfDir, "images/cover"+filepath.Ext(newCoverPath))
 	}
 
 	for _, f := range r.File {
@@ -583,8 +696,18 @@ func metaEdit(inputPath, outputPath, newCoverPath string, meta map[string]string
 
 				reManiTag := regexp.MustCompile(`(?i)(<manifest[^>]*>)`)
 				itemNode := "\n    " + fmt.Sprintf(`<item id="cover" href="%s" media-type="%s" properties="cover-image"/>`,
-					path.Base(targetCoverHref), getMediaType(newCoverPath))
+					strings.TrimPrefix(strings.TrimPrefix(targetCoverHref, opfDir), "/"), getMediaType(newCoverPath))
 				modified = reManiTag.ReplaceAllString(modified, "${1}"+itemNode)
+			}
+
+			if len(newillusPath) > 0 {
+				reMani := regexp.MustCompile(`(?i)(</manifest>)`)
+				modified = reMani.ReplaceAllString(modified, strings.Join(illusManifestItems, "\n    ")+"\n  ${1}")
+				if !hasIllusPage {
+					relPage := strings.TrimPrefix(illusPagePath, opfDir+"/")
+					modified = reMani.ReplaceAllString(modified, fmt.Sprintf("\n    <item id=\"illustration.xhtml\" href=\"%s\" media-type=\"application/xhtml+xml\"/>\n  ${1}", relPage))
+					modified = regexp.MustCompile(`(?i)(<spine[^>]*>)`).ReplaceAllString(modified, "${1}\n    <itemref idref=\"illustration.xhtml\"/>")
+				}
 			}
 
 			fw.Write([]byte(modified))
@@ -592,6 +715,9 @@ func metaEdit(inputPath, outputPath, newCoverPath string, meta map[string]string
 			newCover, _ := os.ReadFile(newCoverPath)
 			fw.Write(newCover)
 			coverWritten = true
+		} else if f.Name == illusPagePath {
+			fw.Write([]byte(illusPageContent))
+			hasIllusPage = true
 		} else {
 			io.Copy(fw, rc)
 		}
@@ -602,6 +728,29 @@ func metaEdit(inputPath, outputPath, newCoverPath string, meta map[string]string
 		cfw, _ := w.Create(targetCoverHref)
 		newCover, _ := os.ReadFile(newCoverPath)
 		cfw.Write(newCover)
+	}
+
+	if len(newillusPath) > 0 {
+		if !hasIllusPage {
+			cfw, _ := w.Create(illusPagePath)
+			cfw.Write([]byte(illusPageContent))
+		}
+		// 写入插画图片
+		for i, imgPath := range newillusPath {
+			imgID := strings.Split(strings.Split(illusManifestItems[i], `id="`)[1], `"`)[0]
+			imgZipPath := ""
+			// 根据ID反推图片路径写入
+			for _, item := range illusManifestItems {
+				if strings.Contains(item, imgID) {
+					re := regexp.MustCompile(`href="([^"]+)"`)
+					href := re.FindStringSubmatch(item)[1]
+					imgZipPath = path.Join(opfDir, href)
+				}
+			}
+			cfw, _ := w.Create(imgZipPath)
+			data, _ := os.ReadFile(imgPath)
+			cfw.Write(data)
+		}
 	}
 
 	if err := w.Close(); err != nil {
@@ -678,7 +827,7 @@ func epubToTxt(inputPath, outputPath string) {
 	}
 }
 
-func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath, llm string, wait int, htime bool, meta map[string]string) {
+func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath string, illusPath []string, llm string, wait int, htime bool, meta map[string]string) {
 
 	contentBytes, err := os.ReadFile(inputPath)
 	if err != nil {
@@ -709,13 +858,56 @@ func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath, llm string
 	}
 
 	if coverPath != "" {
-		internalCoverPath, _ := e.AddImage(coverPath, "cover.jpg")
-		e.SetCover(internalCoverPath, "")
+		if !fileExist(coverPath) {
+			fmt.Printf("✘ 封面文件 %s 不存在或无权限\n", coverPath)
+		} else {
+			internalCoverPath, err := e.AddImage(coverPath, "cover.jpg")
+			if err != nil {
+				fmt.Printf("✘ 封面文件 %s 添加失败: %v\n", coverPath, err)
+			}
+			if err := e.SetCover(internalCoverPath, ""); err != nil {
+				fmt.Printf("✘ 封面文件 %s 配置失败: %v\n", coverPath, err)
+			}
+		}
+	}
+
+	if len(illusPath) > 0 {
+		var htmlBuilder strings.Builder
+		htmlBuilder.WriteString(`<div class="illustration-container" style="text-align: center;">`)
+		for _, p := range illusPath {
+			if !fileExist(p) {
+				fmt.Printf("✘ 插图文件 %s 不存在或无权限\n", p)
+				continue
+			}
+
+			internalPath, err := e.AddImage(p, "")
+			if err != nil {
+				fmt.Printf("✘ 插图文件 %s 添加失败: %v\n", p, err)
+				continue
+			}
+
+			htmlBuilder.WriteString(fmt.Sprintf(`
+			<div style='margin-bottom: 20px; text-align: center; margin: 1em 0; page-break-inside: avoid; page-break-after: auto;'>
+				<img src='%s' style='max-width: 100%%; height: auto; display: block; margin: 0 auto;' />
+			</div>`, internalPath))
+		}
+
+		htmlBuilder.WriteString(`</div>`)
+
+		if _, err = e.AddSection(htmlBuilder.String(), "Illustrations", "illustration.xhtml", ""); err != nil {
+			fmt.Printf("✘ 插画页面添加失败: %v\n", err)
+		}
 	}
 
 	var internalCssPath string
 	if cssPath != "" {
-		internalCssPath, _ = e.AddCSS(cssPath, "style.css")
+		if !fileExist(cssPath) {
+			fmt.Printf("✘ 样式文件 %s 不存在或无权限\n", cssPath)
+		}
+		internalCssPath, err = e.AddCSS(cssPath, "style.css")
+		if err != nil {
+			fmt.Printf("✘ 样式文件 %s 添加失败: %v\n", cssPath, err)
+		}
 	} else {
 		css := `
 		body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Serif CJK SC", serif; line-height: 1.85; padding: 5% 10%; text-align: justify; color: #333; }
@@ -752,7 +944,7 @@ func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath, llm string
 		fmt.Printf("✘ 生成失败: %v", err)
 	} else {
 		if len(meta) > 0 {
-			if err := metaEdit(outputPath, "", "", meta); err != nil {
+			if err := metaEdit(outputPath, "", "", nil, meta); err != nil {
 				fmt.Printf("✘ 注入元数据失败: %v", err)
 				return
 			}
@@ -764,7 +956,7 @@ func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath, llm string
 func buildEpub(e *epub.Epub, content, chapterReg, cssPath, llm string, wait int, htime bool) {
 	reDialog := regexp.MustCompile(`(?s)([“"‘'「].+?[”"’'」])`)
 	reBook := regexp.MustCompile(`([『《〈【〔（({\[].+?[』》〉〕】）)}\]])`)
-	reTime := regexp.MustCompile(`(\d{1,4}年)?\d{1,2}月\d{1,2}[日号號]|\d{1,2}[:：]\d{2}|[子丑寅卯辰巳午未申酉戌亥][时時]|第?[0-9一二三四五六七八九十百千万亿億两兩零壹贰叁肆伍陆陸柒漆捌玖拾佰仟萬数]{1,9}([点點][钟鐘整]|[分秒刻][钟鐘]?|[个個]?小[时時]|[个個]?[钟鐘][头頭]|[个個]?[时時]辰|[更天夜日周週月年]|[个個]?星期|[个個]?[季年]度|[个個]?[岁歲]?月|[个個]?年[头頭]?|甲子|代)|(?i)(?:[清凌]晨|[拂破][晓曉]|早[晨间間]|[上中下]午|午[间間后後]|傍晚|黄昏|薄暮|日落|[入深午子半]夜|整[日天]|白[日天]|晝間|大?[前作今本当當明后後隔][日天]|[翌隔次]日|[上中下]旬|[春夏秋冬][天季]|初春|早春|仲夏|中秋|深秋|秋后|隆冬|立春|雨水|惊蛰|驚蟄|春分|清明|[谷穀]雨|立夏|小[满滿]|芒[种種]|夏至|小暑|大暑|立秋|[处處]暑|白露|秋分|寒露|霜降|立冬|小雪|大雪|冬至|小寒|大寒|大?[去前今本当當明后後隔]年|[上下本当當][月周週]|[周週][一二三四五六壹贰叁肆伍陆陸日天末]|礼拜[一二三四五六壹贰叁肆伍陆陸日天]|星期[一二三四五六壹贰叁肆伍陆陸日天])`)
+	reTime := regexp.MustCompile(`(\d{1,4}年)?\d{1,2}月\d{1,2}[日号號]|\d{1,2}[:：]\d{2}|[子丑寅卯辰巳午未申酉戌亥][时時]|第?[0-9一二三四五六七八九十百千万亿億两兩零壹贰叁肆伍陆陸柒漆捌玖拾佰仟萬数]{1,9}([点點][钟鐘整]|[分秒刻][钟鐘]?|[个個]?小[时時]|[个個]?[钟鐘][头頭]|[个個]?[时時]辰|[更天夜日周週月年岁歲]|[个個]?星期|[个個]?礼拜|[个個]?[季年]度|[个個]?[岁歲]?月|[个個]?年[头頭]?|甲子|代)|(?i)(?:[清凌]晨|[拂破][晓曉]|早[晨间間]|[上中下]午|午[间間后後]|傍晚|黄昏|薄暮|日落|[入深午子半]夜|整[日天]|白[日天]|晝間|大?[前作今本当當明后後隔][日天]|[翌隔次]日|[上中下]旬|[春夏秋冬][天季]|初春|早春|仲夏|中秋|深秋|秋后|隆冬|立春|雨水|惊蛰|驚蟄|春分|清明|[谷穀]雨|立夏|小[满滿]|芒[种種]|夏至|小暑|大暑|立秋|[处處]暑|白露|秋分|寒露|霜降|立冬|小雪|大雪|冬至|小寒|大寒|大?[去前今本当當明后後隔]年|[上下本当當][月周週]|[周週][一二三四五六壹贰叁肆伍陆陸日天末]|礼拜[一二三四五六壹贰叁肆伍陆陸日天]|星期[一二三四五六壹贰叁肆伍陆陸日天])`)
 
 	// jieba := gojieba.NewJieba()
 
@@ -872,6 +1064,28 @@ func getMediaType(path string) string {
 	default:
 		return "image/jpeg"
 	}
+}
+
+func uuid() string {
+	uuid := make([]byte, 16)
+	rand.Read(uuid)
+
+	// 设置版本号 (4) 和变体 (RFC 4122)
+	uuid[6] = (uuid[6] & 0x0f) | 0x40 // Version 4
+	uuid[8] = (uuid[8] & 0x3f) | 0x80 // Variant 10xx
+
+	return fmt.Sprintf("%x-%x-%x-%x-%x",
+		uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
+}
+func fileExist(path string) bool {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	return false
 }
 
 func moveFile(src, dst string) error {
