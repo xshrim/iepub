@@ -3,14 +3,18 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -53,6 +57,8 @@ type AdvancedConfig struct {
 	ImgRe       string // 图片嵌入正则，例如 [IMG:1.jpg]
 	Llm         string // 大模型配置，例如 glm/glm-4-flash:xxxx
 	Wait        int    // 大模型调用毫秒间隔
+	Proxy       string
+	Rate        string
 	Info        bool
 	Htime       bool
 	Port        int
@@ -92,13 +98,189 @@ type NavPoint struct {
 	NavPoints []NavPoint `xml:"navPoint"`         // 递归处理嵌套子目录
 }
 
+type Spider struct {
+	proxy      string
+	httpClient *http.Client
+	ticker     *time.Ticker
+	retries    int
+}
+
+// NewSpider 初始化爬虫
+func NewSpider(rate, prxy string, retry int) *Spider {
+	spider := &Spider{
+		proxy: prxy,
+		httpClient: &http.Client{
+			Timeout: time.Second * 15,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					// 关键：不要使用默认的加密套件顺序
+					CipherSuites: []uint16{
+						tls.TLS_AES_128_GCM_SHA256,
+						tls.TLS_CHACHA20_POLY1305_SHA256,
+						tls.TLS_AES_256_GCM_SHA384,
+						tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+					},
+					CurvePreferences: []tls.CurveID{tls.CurveP256, tls.X25519},
+					// 降低被检测概率：模拟真实的随机 SessionTicket
+					SessionTicketsDisabled: false,
+				},
+				// 限制连接池，防止被发现有成百上千个并发连接
+				MaxIdleConns:      10,
+				IdleConnTimeout:   30 * time.Second,
+				DisableKeepAlives: false, // 尽量复用连接以模拟正常浏览
+			},
+		},
+		// 初始化频率限制器
+		ticker:  time.NewTicker(time.Millisecond * 100),
+		retries: 3,
+	}
+
+	if retry > 0 {
+		spider.retries = retry
+	}
+
+	if rateLimit, err := time.ParseDuration(rate); err == nil {
+		spider.ticker = time.NewTicker(rateLimit)
+	}
+
+	spider.setProxy()
+
+	return spider
+}
+
+// Fetch 执行抓取任务
+func (s *Spider) Fetch(targetURL string) (string, error) {
+	var lastErr error
+
+	for i := 0; i < s.retries; i++ {
+		// 1. 频率控制 + 随机抖动 (Jitter)
+		// 固定的频率很容易被防火墙识别，加入随机延迟模拟人工行为
+		<-s.ticker.C
+		jitter := time.Duration(mrand.IntN(500)) * time.Millisecond
+		time.Sleep(jitter)
+
+		// 2. 使用 Context 设置单次请求超时
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
+		if err != nil {
+			cancel()
+			return "", err
+		}
+
+		// 3. 完善请求头 (反反爬核心)
+		s.setHeaders(req)
+		s.setProxy()
+
+		// 4. 显式关闭连接 (防止大量 TIME_WAIT 导致 EOF)
+		// 如果对方服务器不稳定，开启此项能显著减少 EOF 错误
+		req.Close = true
+
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			cancel()
+			lastErr = err
+			continue
+		}
+
+		// 5. 检查状态码
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			cancel()
+			lastErr = fmt.Errorf("status code: %d", resp.StatusCode)
+
+			// 如果被封 IP (403) 或频率过快 (429)，重试前多等会儿
+			if resp.StatusCode == 403 || resp.StatusCode == 429 {
+				waitTime := 2 * time.Duration(1<<i)
+				time.Sleep(waitTime)
+				continue
+			}
+			continue
+		}
+
+		// 6. 读取数据
+		bodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		cancel() // 及时释放 Context 资源
+
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(bodyBytes) == 0 {
+			lastErr = fmt.Errorf("empty response body")
+			continue
+		}
+
+		return string(bodyBytes), nil
+	}
+
+	return "", lastErr
+}
+
+func (s *Spider) setProxy() {
+	if proxyURL, err := url.Parse(strings.TrimSpace(strings.Split(s.proxy, ",")[mrand.IntN(len(strings.Split(s.proxy, ",")))])); err == nil {
+		s.httpClient.Transport.(*http.Transport).Proxy = http.ProxyURL(proxyURL)
+	}
+}
+
+// 完善 Header 伪装
+func (s *Spider) setHeaders(req *http.Request) {
+	// 随机选择 User-Agent
+	uas := []string{
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+	}
+	req.Header.Set("User-Agent", uas[mrand.IntN(len(uas))])
+
+	// 补充必要的浏览器特征 Header
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("sec-ch-ua", `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`)
+
+	// 关键：模拟来源地址，有些网站会检查 Referer
+	referers := []string{
+		"https://www.google.com/",
+		"https://www.bing.com/",
+		"https://duckduckgo.com/",
+	}
+	req.Header.Set("Referer", referers[mrand.IntN(len(referers))])
+}
+
+func Write(filename string, message string, show bool) error {
+	// 1. 打开文件（如果不存在则创建，追加模式）
+	// os.O_APPEND: 追加写入
+	// os.O_CREATE: 文件不存在则创建
+	// os.O_WRONLY: 只写模式
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("无法打开文件: %v", err)
+	}
+	defer f.Close()
+
+	// 2. 创建 MultiWriter，组合标准输出 (Stdout) 和文件 (f)
+	mw := io.MultiWriter(os.Stdout, f)
+	if !show {
+		mw = io.MultiWriter(f)
+	}
+
+	// 3. 向 MultiWriter 写入，它会自动分发到两个地方
+	_, err = fmt.Fprintln(mw, message)
+	return err
+}
+
 func main() {
 	cfg := AdvancedConfig{}
 	flag.BoolVar(&cfg.Info, "i", false, "获取或修改epub元数据")
 	flag.StringVar(&cfg.OutputPath, "o", "", "输出文件(默认: 输入文件名.epub)")
 	flag.StringVar(&cfg.Title, "t", "", "书名(默认: 输入文件名)")
 	flag.StringVar(&cfg.Creator, "a", "", "作者")
-	flag.StringVar(&cfg.Contributor, "x", "", "制作者与协作者")
+	flag.StringVar(&cfg.Contributor, "j", "", "制作者与协作者")
 	flag.StringVar(&cfg.Language, "g", "", "语言")
 	flag.StringVar(&cfg.Description, "e", "", "描述")
 	flag.StringVar(&cfg.Subject, "k", "", "标签")
@@ -113,6 +295,8 @@ func main() {
 	flag.BoolVar(&cfg.Htime, "v", false, "高亮时间")
 	flag.StringVar(&cfg.Llm, "l", "", "大模型补全章节标题(格式: glm/glm-4-flash:xxxx)")
 	flag.IntVar(&cfg.Wait, "w", 1000, "大模型调用毫秒间隔(默认: 1000ms)")
+	flag.StringVar(&cfg.Proxy, "x", "", "网页请求代理(格式: http://127.0.0.1:1080)")
+	flag.StringVar(&cfg.Rate, "n", "1s", "网页请求间隔(默认: 1s)")
 	flag.IntVar(&cfg.Port, "p", 2233, "服务端口(默认: 2233)")
 	flag.Parse()
 
@@ -124,17 +308,17 @@ func main() {
 		}
 	}
 	if cfg.InputPath == "" {
-		fmt.Println("✘ 错误: 请提供输入文件")
-		fmt.Println("用法示例: iepub input.txt 或 iepub input.epub")
-		return
-	}
-	if _, err := os.Stat(cfg.InputPath); err != nil {
-		fmt.Println("✘ 错误: 获取输入文件失败:", err.Error())
+		fmt.Println("✘ 错误: 请提供输入文件或请求网页")
+		fmt.Println("用法示例: iepub input.txt 或 iepub input.epub 或iepub xxx.com/xxx")
 		return
 	}
 
 	switch strings.ToLower(filepath.Ext(filepath.Base(cfg.InputPath))) {
 	case ".txt":
+		if _, err := os.Stat(cfg.InputPath); err != nil {
+			fmt.Println("✘ 错误: 获取输入文件失败:", err.Error())
+			return
+		}
 		if cfg.OutputPath == "" {
 			cfg.OutputPath = strings.TrimSuffix(filepath.Base(cfg.InputPath), filepath.Ext(filepath.Base(cfg.InputPath))) + ".epub"
 			fmt.Printf("ℹ 未指定输出文件名，自动使用输入文件名: [%s]\n", cfg.OutputPath)
@@ -190,6 +374,10 @@ func main() {
 
 		txtToEpub(cfg.InputPath, cfg.OutputPath, cfg.ChapterRe, cfg.CoverPath, cfg.CssPath, illusPath, cfg.Llm, cfg.Wait, cfg.Htime, meta)
 	case ".epub":
+		if _, err := os.Stat(cfg.InputPath); err != nil {
+			fmt.Println("✘ 错误: 获取输入文件失败:", err.Error())
+			return
+		}
 		if cfg.Info {
 			meta := make(map[string]string)
 			if cfg.Title != "" {
@@ -273,7 +461,102 @@ func main() {
 			}
 			epubToTxt(cfg.InputPath, cfg.OutputPath)
 		}
+	default: // 爬取网页
+		crawl(cfg.InputPath, cfg.Rate, cfg.Proxy, 3)
 	}
+}
+
+func crawl(upath, rate, proxy string, retry int) (string, error) {
+	var filename string
+	u, err := url.Parse(upath)
+	if err != nil {
+		fmt.Printf("✘ 无法识别为有效的URL: %v\n", err)
+		return filename, err
+	}
+	spider := NewSpider(rate, proxy, retry)
+	fmt.Printf("ℹ 正在爬取简介页: %s ... ", upath)
+
+	switch u.Hostname() {
+	case "www.alicesw.com":
+		content, err := spider.Fetch(upath)
+		if err != nil {
+			fmt.Printf("[错误: %v]\n", err)
+			return filename, err
+		}
+		doc, err := goquery.NewDocumentFromReader(strings.NewReader(content))
+		if err != nil {
+			fmt.Printf("[错误: %v]\n", err)
+			return filename, err
+		}
+
+		info := doc.Find("div.box_intro")
+
+		name := strings.TrimSpace(info.Find("div.box_info div.novel_title").Text())
+		author := strings.TrimSpace(info.Find("div.box_info div.novel_info p").Eq(0).Find("a").Text())
+		cata := strings.TrimSpace(info.Find("div.box_info div.novel_info p").Eq(1).Find("a").Text())
+		status := strings.TrimSpace(strings.TrimPrefix(info.Find("div.box_info div.novel_info p").Eq(4).Text(), "状 态："))
+		image := info.Find("div.pic img").AttrOr("src", "")
+
+		if name == "" {
+			fmt.Printf("[错误: 获取简介失败]\n")
+			return filename, fmt.Errorf("empty")
+		} else {
+			fmt.Printf("[成功]\n")
+		}
+
+		filename = fmt.Sprintf("%s.txt", name)
+		Write(filename, fmt.Sprintf("%s\n\n作者：%s\n分类：%s\n状态：%s\n封面：%s\n--------------------------------------------------\n", name, author, cata, status, image), true)
+
+		curlpath, _ := url.JoinPath(fmt.Sprintf("%s://%s", u.Scheme, u.Host), "/other/chapters/id/", path.Base(u.Path))
+
+		fmt.Printf("正在爬取章节页: [%s] %s ... ", name, curlpath)
+		ccontent, err := spider.Fetch(curlpath)
+		if err != nil {
+			fmt.Printf("[错误: %v]\n", err)
+			return filename, err
+		}
+		cdoc, err := goquery.NewDocumentFromReader(strings.NewReader(ccontent))
+		if err != nil {
+			fmt.Printf("[错误: %v]\n", err)
+			return filename, err
+		}
+
+		if strings.TrimSpace(cdoc.Find("div.mu_h1 h1").Text()) == "" {
+			fmt.Printf("[错误: 获取章节失败]\n")
+			return filename, fmt.Errorf("empty")
+		} else {
+			fmt.Printf("[成功]\n")
+		}
+
+		cdoc.Find("ul.mulu_list li").Each(func(i int, s *goquery.Selection) {
+			chapterTitle := s.Find("a").Text()
+			chapterLink := s.Find("a").AttrOr("href", "")
+
+			surlpath, _ := url.JoinPath(fmt.Sprintf("%s://%s", u.Scheme, u.Host), chapterLink)
+
+			fmt.Printf("正在爬取内容页: [%s] %s ... ", chapterTitle, surlpath)
+			scontent, err := spider.Fetch(surlpath)
+			if err == nil {
+				sdoc, err := goquery.NewDocumentFromReader(strings.NewReader(scontent))
+				if err == nil {
+					if strings.TrimSpace(sdoc.Find("div.text-head h3").Text()) == "" {
+						fmt.Printf("[错误: 获取内容失败]\n")
+					} else {
+						fmt.Printf("[成功]\n")
+						Write(filename, chapterTitle+"\n", false)
+						sdoc.Find("div.read-content p").Each(func(i int, s *goquery.Selection) {
+							Write(filename, s.Text()+"\n", false)
+						})
+					}
+				} else {
+					fmt.Printf("[错误: %v]\n", err)
+				}
+			} else {
+				fmt.Printf("[错误: %v]\n", err)
+			}
+		})
+	}
+	return filepath.Abs(filename)
 }
 
 func server(port int) {
