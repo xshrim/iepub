@@ -218,8 +218,12 @@ func (s *Spider) Fetch(targetURL string) (string, error) {
 }
 
 func (s *Spider) setProxy() {
-	if proxyURL, err := url.Parse(strings.TrimSpace(strings.Split(s.proxy, ",")[mrand.IntN(len(strings.Split(s.proxy, ",")))])); err == nil {
-		s.httpClient.Transport.(*http.Transport).Proxy = http.ProxyURL(proxyURL)
+	if s.proxy == "" {
+		s.httpClient.Transport.(*http.Transport).Proxy = http.ProxyFromEnvironment
+	} else {
+		if proxyURL, err := url.Parse(strings.TrimSpace(strings.Split(s.proxy, ",")[mrand.IntN(len(strings.Split(s.proxy, ",")))])); err == nil {
+			s.httpClient.Transport.(*http.Transport).Proxy = http.ProxyURL(proxyURL)
+		}
 	}
 }
 
@@ -250,28 +254,6 @@ func (s *Spider) setHeaders(req *http.Request) {
 		"https://duckduckgo.com/",
 	}
 	req.Header.Set("Referer", referers[mrand.IntN(len(referers))])
-}
-
-func Write(filename string, message string, show bool) error {
-	// 1. 打开文件（如果不存在则创建，追加模式）
-	// os.O_APPEND: 追加写入
-	// os.O_CREATE: 文件不存在则创建
-	// os.O_WRONLY: 只写模式
-	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("无法打开文件: %v", err)
-	}
-	defer f.Close()
-
-	// 2. 创建 MultiWriter，组合标准输出 (Stdout) 和文件 (f)
-	mw := io.MultiWriter(os.Stdout, f)
-	if !show {
-		mw = io.MultiWriter(f)
-	}
-
-	// 3. 向 MultiWriter 写入，它会自动分发到两个地方
-	_, err = fmt.Fprintln(mw, message)
-	return err
 }
 
 func main() {
@@ -372,7 +354,7 @@ func main() {
 			}
 		}
 
-		txtToEpub(cfg.InputPath, cfg.OutputPath, cfg.ChapterRe, cfg.CoverPath, cfg.CssPath, illusPath, cfg.Llm, cfg.Wait, cfg.Htime, meta)
+		txtToEpub(cfg.InputPath, cfg.OutputPath, cfg.ChapterRe, cfg.CoverPath, cfg.CssPath, illusPath, cfg.Llm, cfg.Wait, cfg.Htime, meta, cfg.Proxy)
 	case ".epub":
 		if _, err := os.Stat(cfg.InputPath); err != nil {
 			fmt.Println("✘ 错误: 获取输入文件失败:", err.Error())
@@ -423,7 +405,7 @@ func main() {
 						}
 					}
 				}
-				metaEdit(cfg.InputPath, cfg.OutputPath, cfg.CoverPath, illusPath, meta)
+				metaEdit(cfg.InputPath, cfg.OutputPath, cfg.CoverPath, illusPath, meta, cfg.Proxy)
 			} else {
 				if meta, err := metaView(cfg.InputPath); err != nil {
 					fmt.Printf("✘ 未找到元数据: %v\n", err)
@@ -466,106 +448,33 @@ func main() {
 	}
 }
 
-func crawl(upath, rate, proxy string, retry int) (string, error) {
-	var filename string
-	u, err := url.Parse(upath)
-	if err != nil {
-		fmt.Printf("✘ 无法识别为有效的URL: %v\n", err)
-		return filename, err
-	}
-	spider := NewSpider(rate, proxy, retry)
-	fmt.Printf("ℹ 正在爬取简介页: %s ... ", upath)
-
-	switch u.Hostname() {
-	case "www.alicesw.com":
-		content, err := spider.Fetch(upath)
-		if err != nil {
-			fmt.Printf("[错误: %v]\n", err)
-			return filename, err
-		}
-		doc, err := goquery.NewDocumentFromReader(strings.NewReader(content))
-		if err != nil {
-			fmt.Printf("[错误: %v]\n", err)
-			return filename, err
-		}
-
-		info := doc.Find("div.box_intro")
-
-		name := strings.TrimSpace(info.Find("div.box_info div.novel_title").Text())
-		author := strings.TrimSpace(info.Find("div.box_info div.novel_info p").Eq(0).Find("a").Text())
-		cata := strings.TrimSpace(info.Find("div.box_info div.novel_info p").Eq(1).Find("a").Text())
-		status := strings.TrimSpace(strings.TrimPrefix(info.Find("div.box_info div.novel_info p").Eq(4).Text(), "状 态："))
-		image := info.Find("div.pic img").AttrOr("src", "")
-
-		if name == "" {
-			fmt.Printf("[错误: 获取简介失败]\n")
-			return filename, fmt.Errorf("empty")
-		} else {
-			fmt.Printf("[成功]\n")
-		}
-
-		filename = fmt.Sprintf("%s.txt", name)
-		Write(filename, fmt.Sprintf("%s\n\n作者：%s\n分类：%s\n状态：%s\n封面：%s\n--------------------------------------------------\n", name, author, cata, status, image), true)
-
-		curlpath, _ := url.JoinPath(fmt.Sprintf("%s://%s", u.Scheme, u.Host), "/other/chapters/id/", path.Base(u.Path))
-
-		fmt.Printf("正在爬取章节页: [%s] %s ... ", name, curlpath)
-		ccontent, err := spider.Fetch(curlpath)
-		if err != nil {
-			fmt.Printf("[错误: %v]\n", err)
-			return filename, err
-		}
-		cdoc, err := goquery.NewDocumentFromReader(strings.NewReader(ccontent))
-		if err != nil {
-			fmt.Printf("[错误: %v]\n", err)
-			return filename, err
-		}
-
-		if strings.TrimSpace(cdoc.Find("div.mu_h1 h1").Text()) == "" {
-			fmt.Printf("[错误: 获取章节失败]\n")
-			return filename, fmt.Errorf("empty")
-		} else {
-			fmt.Printf("[成功]\n")
-		}
-
-		cdoc.Find("ul.mulu_list li").Each(func(i int, s *goquery.Selection) {
-			chapterTitle := s.Find("a").Text()
-			chapterLink := s.Find("a").AttrOr("href", "")
-
-			surlpath, _ := url.JoinPath(fmt.Sprintf("%s://%s", u.Scheme, u.Host), chapterLink)
-
-			fmt.Printf("正在爬取内容页: [%s] %s ... ", chapterTitle, surlpath)
-			scontent, err := spider.Fetch(surlpath)
-			if err == nil {
-				sdoc, err := goquery.NewDocumentFromReader(strings.NewReader(scontent))
-				if err == nil {
-					if strings.TrimSpace(sdoc.Find("div.text-head h3").Text()) == "" {
-						fmt.Printf("[错误: 获取内容失败]\n")
-					} else {
-						fmt.Printf("[成功]\n")
-						Write(filename, chapterTitle+"\n", false)
-						sdoc.Find("div.read-content p").Each(func(i int, s *goquery.Selection) {
-							Write(filename, s.Text()+"\n", false)
-						})
-					}
-				} else {
-					fmt.Printf("[错误: %v]\n", err)
-				}
-			} else {
-				fmt.Printf("[错误: %v]\n", err)
-			}
-		})
-	}
-	return filepath.Abs(filename)
-}
-
 func server(port int) {
+	http.HandleFunc("/crawl", handleCrawl)
 	http.HandleFunc("/convert", handleConvert)
 	http.HandleFunc("/metadata", handleGetMetadata)
 	http.HandleFunc("/edit", handleEditMetadata)
 
 	fmt.Printf("▶ 启动服务模式: http://0.0.0.0:%d\n", port)
 	http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
+}
+
+func handleCrawl(w http.ResponseWriter, r *http.Request) {
+	upath := r.FormValue("url")
+	rate := r.FormValue("rate")
+	proxy := r.FormValue("proxy")
+
+	if upath == "" {
+		http.Error(w, "请输入请求URL", http.StatusBadRequest)
+	}
+
+	opath, err := crawl(upath, rate, proxy, 3)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+	w.Header().Set("Content-Disposition", "attachment; filename="+filepath.Base(opath))
+	http.ServeFile(w, r, opath)
+	os.Remove(opath)
 }
 
 func handleGetMetadata(w http.ResponseWriter, r *http.Request) {
@@ -605,6 +514,8 @@ func handleEditMetadata(w http.ResponseWriter, r *http.Request) {
 	io.Copy(f, file)
 	f.Close()
 	defer os.Remove(tempInput)
+
+	proxy := r.FormValue("proxy")
 
 	meta := make(map[string]string)
 
@@ -659,7 +570,7 @@ func handleEditMetadata(w http.ResponseWriter, r *http.Request) {
 		defer os.Remove(tempIllus)
 	}
 
-	err = metaEdit(tempInput, tempOutput, newCoverPath, newillusPath, meta)
+	err = metaEdit(tempInput, tempOutput, newCoverPath, newillusPath, meta, proxy)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -684,6 +595,8 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 
 	var outputName string
 	var targetPath string
+
+	proxy := r.FormValue("proxy")
 
 	meta := make(map[string]string)
 	// 2. 获取修改参数
@@ -766,7 +679,7 @@ func handleConvert(w http.ResponseWriter, r *http.Request) {
 	case ".txt":
 		outputName = strings.TrimSuffix(header.Filename, ".txt") + ".epub"
 		targetPath = filepath.Join(os.TempDir(), outputName)
-		txtToEpub(tempInput, targetPath, chpre, newCoverPath, newCssPath, newillusPath, llm, wait, htime, meta)
+		txtToEpub(tempInput, targetPath, chpre, newCoverPath, newCssPath, newillusPath, llm, wait, htime, meta, proxy)
 	}
 
 	w.Header().Set("Content-Disposition", "attachment; filename="+outputName)
@@ -850,9 +763,18 @@ func metaView(inputPath string) (map[string]string, error) {
 	return meta, nil
 }
 
-func metaEdit(inputPath, outputPath, newCoverPath string, newillusPath []string, meta map[string]string) error {
+func metaEdit(inputPath, outputPath, newCoverPath string, newillusPath []string, meta map[string]string, proxy string) error {
 	if len(meta) == 0 && newCoverPath == "" && len(newillusPath) == 0 {
 		return nil
+	}
+
+	if newCoverPath != "" {
+		if !fileExist(newCoverPath) {
+			newCoverPath, _ = downloadImage(newCoverPath, proxy)
+			if !fileExist(newCoverPath) {
+				newCoverPath = ""
+			}
+		}
 	}
 
 	r, err := zip.OpenReader(inputPath)
@@ -1110,7 +1032,7 @@ func epubToTxt(inputPath, outputPath string) {
 	}
 }
 
-func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath string, illusPath []string, llm string, wait int, htime bool, meta map[string]string) {
+func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath string, illusPath []string, llm string, wait int, htime bool, meta map[string]string, proxy string) {
 
 	contentBytes, err := os.ReadFile(inputPath)
 	if err != nil {
@@ -1140,11 +1062,27 @@ func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath string, ill
 		}
 	}
 
+	if coverPath == "" {
+		prelen := 30
+		if len(decodedContent) < prelen {
+			prelen = len(decodedContent)
+		}
+		coverPath = searchCoverLink(strings.Split(decodedContent, "\n")[:prelen])
+		if coverPath != "" {
+			fmt.Printf("ℹ 正文中识别到封面图链接: %s\n", coverPath)
+		}
+	}
 	if coverPath != "" {
 		if !fileExist(coverPath) {
-			fmt.Printf("✘ 封面文件 %s 不存在或无权限\n", coverPath)
-		} else {
-			internalCoverPath, err := e.AddImage(coverPath, "cover.jpg")
+			coverPath, _ = downloadImage(coverPath, proxy)
+			if !fileExist(coverPath) {
+				fmt.Printf("✘ 封面文件 %s 不存在或无权限\n", coverPath)
+			} else {
+				fmt.Printf("ℹ 封面文件 %s 下载成功\n", coverPath)
+			}
+		}
+		if fileExist(coverPath) {
+			internalCoverPath, err := e.AddImage(coverPath, "cover"+filepath.Ext(coverPath))
 			if err != nil {
 				fmt.Printf("✘ 封面文件 %s 添加失败: %v\n", coverPath, err)
 			}
@@ -1227,7 +1165,7 @@ func txtToEpub(inputPath, outputPath, chapterReg, coverPath, cssPath string, ill
 		fmt.Printf("✘ 生成失败: %v", err)
 	} else {
 		if len(meta) > 0 {
-			if err := metaEdit(outputPath, "", "", nil, meta); err != nil {
+			if err := metaEdit(outputPath, "", "", nil, meta, proxy); err != nil {
 				fmt.Printf("✘ 注入元数据失败: %v", err)
 				return
 			}
@@ -1428,6 +1366,16 @@ func ensureMetadataTag(xmlStr, tagName, tagValue string) string {
 	return reMeta.ReplaceAllString(xmlStr, "${1}"+newNode)
 }
 
+func searchCoverLink(lines []string) string {
+	link := ""
+	for _, line := range lines {
+		if matches := regexp.MustCompile(`(?i)^\s*(?:Cover|封面|封面图)[：:]\s*(https?://[^\s\n]+).*$`).FindStringSubmatch(line); len(matches) > 1 {
+			return strings.TrimSpace(matches[1])
+		}
+	}
+	return link
+}
+
 func lockRegex(lines []string, customRe string) []string {
 	// 1. 定义内置正则库
 	patterns := []string{
@@ -1458,7 +1406,11 @@ func lockRegex(lines []string, customRe string) []string {
 
 	// 如果用户提供了自定义正则，优先级最高
 	if customRe != "" {
-		fmt.Printf("¶ 启用用户自定义章节正则: %s\n", customRe)
+		if length, err := strconv.Atoi(customRe); err == nil {
+			fmt.Printf("¶ 启用用户自定义章节长度: <=%d\n", length)
+		} else {
+			fmt.Printf("¶ 启用用户自定义章节正则: %s\n", customRe)
+		}
 		return []string{customRe}
 	}
 
@@ -1516,7 +1468,7 @@ func lockRegex(lines []string, customRe string) []string {
 
 func trueTitle(str string) string {
 	title := strings.TrimSpace(strings.TrimPrefix(str, "正文 "))
-	for _, s := range []string{"序言", "前言", "后记", "後記", "番外", "引子", "前言", "自序", "终章", "終章", "结局", "結局", "楔子", "致谢", "致謝", "目录", "目錄", "附录", "附錄", "简介", "簡介", "内容简介", "內容簡介", "作品相关", "作品相關", "写在最后", "寫在最後", "Catalog", "Preface", "Foreword", "Prologue", "Abstract", "Summary", "Synopsis", "Opening", "Ending", "Afterword", "Epilogue", "Interlude", "Appendix", "Acknowledgments", "Postscript", "Extra", "Toc", "Table of Contents", "Related Information", "Back Matter", "Final Words", " Closing Remarks", "Side Story"} {
+	for _, s := range []string{"序", "序言", "序章", "前言", "后记", "後記", "番外", "引子", "前言", "自序", "终章", "終章", "结局", "結局", "结语", "結语", "结語", "結語", "楔子", "致谢", "致謝", "目录", "目錄", "附录", "附錄", "简介", "簡介", "内容简介", "內容簡介", "作品相关", "作品相關", "写在最后", "寫在最後", "Catalog", "Preface", "Foreword", "Prologue", "Abstract", "Summary", "Synopsis", "Opening", "Ending", "Afterword", "Epilogue", "Interlude", "Appendix", "Acknowledgments", "Postscript", "Extra", "Toc", "Table of Contents", "Related Information", "Back Matter", "Final Words", " Closing Remarks", "Side Story"} {
 		if strings.HasPrefix(strings.ToLower(title), strings.ToLower(s)) {
 			return str
 		}
@@ -1557,19 +1509,25 @@ func isChapter(line string, regexps []string) bool {
 		return false
 	}
 	// 前言后记等特殊章节直接识别
-	if matched, _ := regexp.MatchString(`(?m)^\s*(序言|前言|后记|後記|番外|引子|前言|自序|终章|終章|结局|結局|楔子|致谢|致謝|目录|目錄|附录|附錄|简介|簡介|内容简介|內容簡介|作品相关|作品相關|写在最后|寫在最後)\s*$`, line); matched {
+	if matched, _ := regexp.MatchString(`(?m)^\s*(序|序章|序言|前言|后记|後記|番外|引子|前言|自序|终章|終章|结局|結局|结语|結语|结語|結語|楔子|致谢|致謝|目录|目錄|附录|附錄|简介|簡介|内容简介|內容簡介|作品相关|作品相關|写在最后|寫在最後)\s*$`, line); matched {
 		return true
 	}
 
 	lastChar := runeLine[len(runeLine)-1]
-	if strings.ContainsRune("，。：”》", lastChar) {
+	if strings.ContainsRune("，。：”’》」；'\",;", lastChar) {
 		return false
 	}
 
 	for _, reStr := range regexps {
-		matched, _ := regexp.MatchString(reStr, line)
-		if matched {
-			return true
+		if length, err := strconv.Atoi(reStr); err == nil {
+			if len(runeLine) <= length {
+				return true
+			}
+		} else {
+			matched, _ := regexp.MatchString(reStr, line)
+			if matched {
+				return true
+			}
 		}
 	}
 	return false
@@ -1680,6 +1638,174 @@ func highlightCode(code, language string) string {
 
 func wrap(body string) string {
 	return fmt.Sprintf("<body>%s</body>", body)
+}
+
+func downloadImage(imgURL, proxy string) (string, error) {
+	var proxyFunc func(*http.Request) (*url.URL, error)
+
+	if proxy != "" {
+		proxyURL, err := url.Parse(proxy)
+		if err != nil {
+			return "", fmt.Errorf("代理地址格式错误: %v", err)
+		}
+		proxyFunc = http.ProxyURL(proxyURL)
+	} else {
+		proxyFunc = http.ProxyFromEnvironment
+	}
+
+	transport := &http.Transport{
+		Proxy:           proxyFunc,
+		IdleConnTimeout: 90 * time.Second,
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+	}
+
+	resp, err := client.Get(imgURL)
+	if err != nil {
+		return "", fmt.Errorf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("服务器返回状态码: %d", resp.StatusCode)
+	}
+
+	fileName := filepath.Base(imgURL)
+	if fileName == "." || fileName == "/" {
+		fileName = "cover.jpg" // 兜底文件名
+	}
+
+	out, err := os.Create(fileName)
+	if err != nil {
+		return "", fmt.Errorf("无法创建文件: %v", err)
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("保存内容失败: %v", err)
+	}
+
+	absPath, _ := filepath.Abs(fileName)
+	return absPath, nil
+}
+
+func crawl(upath, rate, proxy string, retry int) (string, error) {
+	var filename string
+	u, err := url.Parse(upath)
+	if err != nil {
+		fmt.Printf("✘ 无法识别为有效的URL: %v\n", err)
+		return filename, err
+	}
+	spider := NewSpider(rate, proxy, retry)
+	fmt.Printf("ℹ 正在爬取简介页: %s ... ", upath)
+
+	switch u.Hostname() {
+	case "alicesw.com", "www.alicesw.com":
+		content, err := spider.Fetch(upath)
+		if err != nil {
+			fmt.Printf("[错误: %v]\n", err)
+			return filename, err
+		}
+		doc, err := goquery.NewDocumentFromReader(strings.NewReader(content))
+		if err != nil {
+			fmt.Printf("[错误: %v]\n", err)
+			return filename, err
+		}
+
+		info := doc.Find("div.box_intro")
+
+		name := strings.TrimSpace(info.Find("div.box_info div.novel_title").Text())
+		author := strings.TrimSpace(info.Find("div.box_info div.novel_info p").Eq(0).Find("a").Text())
+		cata := strings.TrimSpace(info.Find("div.box_info div.novel_info p").Eq(1).Find("a").Text())
+		status := strings.TrimSpace(strings.TrimPrefix(info.Find("div.box_info div.novel_info p").Eq(4).Text(), "状 态："))
+		image := info.Find("div.pic img").AttrOr("src", "")
+
+		if name == "" {
+			fmt.Printf("[错误: 获取简介失败]\n")
+			return filename, fmt.Errorf("empty")
+		} else {
+			fmt.Printf("[成功]\n")
+		}
+
+		filename = fmt.Sprintf("%s.txt", name)
+		write(filename, fmt.Sprintf("%s\n\n作者：%s\n分类：%s\n状态：%s\n封面：%s\n--------------------------------------------------\n", name, author, cata, status, image), true)
+
+		curlpath, _ := url.JoinPath(fmt.Sprintf("%s://%s", u.Scheme, u.Host), "/other/chapters/id/", path.Base(u.Path))
+
+		fmt.Printf("ℹ 正在爬取章节页: [%s] %s ... ", name, curlpath)
+		ccontent, err := spider.Fetch(curlpath)
+		if err != nil {
+			fmt.Printf("[错误: %v]\n", err)
+			return filename, err
+		}
+		cdoc, err := goquery.NewDocumentFromReader(strings.NewReader(ccontent))
+		if err != nil {
+			fmt.Printf("[错误: %v]\n", err)
+			return filename, err
+		}
+
+		if strings.TrimSpace(cdoc.Find("div.mu_h1 h1").Text()) == "" {
+			fmt.Printf("[错误: 获取章节失败]\n")
+			return filename, fmt.Errorf("empty")
+		} else {
+			fmt.Printf("[成功]\n")
+		}
+
+		cdoc.Find("ul.mulu_list li").Each(func(i int, s *goquery.Selection) {
+			chapterTitle := strings.TrimSpace(s.Find("a").Text())
+			chapterLink := s.Find("a").AttrOr("href", "")
+
+			surlpath, _ := url.JoinPath(fmt.Sprintf("%s://%s", u.Scheme, u.Host), chapterLink)
+
+			fmt.Printf("ℹ 正在爬取内容页: [%s] %s ... ", chapterTitle, surlpath)
+			scontent, err := spider.Fetch(surlpath)
+			if err == nil {
+				sdoc, err := goquery.NewDocumentFromReader(strings.NewReader(scontent))
+				if err == nil {
+					if strings.TrimSpace(sdoc.Find("div.text-head h3").Text()) == "" {
+						fmt.Printf("[错误: 获取内容失败]\n")
+					} else {
+						fmt.Printf("[成功]\n")
+						write(filename, chapterTitle+"\n", false)
+						sdoc.Find("div.read-content p").Each(func(i int, s *goquery.Selection) {
+							write(filename, s.Text()+"\n", false)
+						})
+					}
+				} else {
+					fmt.Printf("[错误: %v]\n", err)
+				}
+			} else {
+				fmt.Printf("[错误: %v]\n", err)
+			}
+		})
+	}
+	return filepath.Abs(filename)
+}
+
+func write(filename string, message string, show bool) error {
+	// 1. 打开文件（如果不存在则创建，追加模式）
+	// os.O_APPEND: 追加写入
+	// os.O_CREATE: 文件不存在则创建
+	// os.O_WRONLY: 只写模式
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("无法打开文件: %v", err)
+	}
+	defer f.Close()
+
+	// 2. 创建 MultiWriter，组合标准输出 (Stdout) 和文件 (f)
+	mw := io.MultiWriter(os.Stdout, f)
+	if !show {
+		mw = io.MultiWriter(f)
+	}
+
+	// 3. 向 MultiWriter 写入，它会自动分发到两个地方
+	_, err = fmt.Fprintln(mw, message)
+	return err
 }
 
 func getAiTitle(llm, chapterContent string, wait int) (string, string) {
