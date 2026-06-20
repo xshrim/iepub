@@ -39,7 +39,7 @@ iepub -p 2233 server
 iepub -i xxx.epub
 
 # 修改epub元数据(所有参数都是可选的)
-iepub -t <书名> -a <作者> -x <协作> -g <语言> -e <描述> -k <标签> -d <发行日> -u <出版商> -b <版权声明> -c <封面图> -z <插图> xxx.epub
+iepub -i -t <书名> -a <作者> -x <协作> -g <语言> -e <描述> -k <标签> -d <发行日> -u <出版商> -b <版权声明> -c <封面图> -z <插图> xxx.epub
 
 # 将xxx.txt文件转换为名为xxx.epub的epub格式(未指定输出文件名时将自动设为输入文件名)
 iepub xxx.txt   
